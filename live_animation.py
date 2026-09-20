@@ -39,8 +39,9 @@ POS = {
     'tisch':   np.array([0.62, 1.00]),
     'kopf':    np.array([0.28, 2.05]),
     'meldung': np.array([0.00, 2.90]),
+    'boden':   np.array([0.62, 0.35]),
 }
-FARBE = {'meldung': 'red', 'kopf': 'orange', 'tisch': 'green'}
+FARBE = {'meldung': 'red', 'kopf': 'orange', 'tisch': 'green', 'boden': 'blue'}
 
 
 def read_sample(ser):
@@ -64,7 +65,7 @@ def schaetze_hoehe(puffer):
     a = np.array(puffer, dtype=float)[:, 0:3] / 16384.0  # nominal g
     n = len(a)
     if n < 20:
-        return 0.0
+        return 0.0, 0.0
 
     # Schwerkraft-Richtung per Tiefpass (EMA) verfolgen
     alpha = 0.05
@@ -89,7 +90,9 @@ def schaetze_hoehe(puffer):
     v = v - v[-1] * idx / max(n - 1, 1)
 
     s = np.cumsum(v) * dt
-    return float(s.max() - s[0])          # Spitzen-Hoehe
+    hoch = float(s.max() - s[0])   # Weg nach oben
+    tief = float(s[0] - s.min())   # Weg nach unten
+    return hoch, tief
 
 
 def merkmale(arr):
@@ -102,7 +105,7 @@ def merkmale(arr):
     return np.array([[m[0], m[1], m[2], acc_std, float(gyrmag.mean()), float(gyrmag.max())]])
 
 
-def zeichne(ax, hand_pos, klasse, p, meldungen, hoehe):
+def zeichne(ax, hand_pos, klasse, p, meldungen, hoch, tief):
     ax.clear()
     ax.set_xlim(-1.2, 1.4)
     ax.set_ylim(-0.2, 3.2)
@@ -142,7 +145,8 @@ def zeichne(ax, hand_pos, klasse, p, meldungen, hoehe):
                  f"P(meldung)={p.get('meldung', 0):.2f}  "
                  f"P(kopf)={p.get('kopf', 0):.2f}  "
                  f"P(tisch)={p.get('tisch', 0):.2f}", fontsize=10)
-    ax.text(0.35, 3.0, f"Hoehe: {hoehe:.2f} m", fontsize=12, ha='center', color='blue')
+    ax.text(0.35, 3.0, f"Hoch: {hoch:.2f} m   Tief: {tief:.2f} m", fontsize=12,
+            ha='center', color='blue')
     ax.text(0.35, 2.7, f"Meldungen: {meldungen}", fontsize=13, ha='center',
             color='red', fontweight='bold')
     ax.text(-1.15, -0.15, "Strg+C zum Beenden", fontsize=8, color='gray')
@@ -196,7 +200,8 @@ def main():
     zaehler = 0
     p = {'meldung': 0.0, 'kopf': 0.0, 'tisch': 1.0}
     klasse = 'tisch'
-    hoehe = 0.0
+    hoch = 0.0
+    tief = 0.0
     letzter_draw = 0
 
     print("Live-Erkennung laeuft. Hand hoch heben = Meldung.\n")
@@ -221,11 +226,11 @@ def main():
             p = dict(zip(model.classes_, proba))
             klasse = max(p, key=p.get)
 
-            hoehe = schaetze_hoehe(puffer)
+            hoch, tief = schaetze_hoehe(puffer)
 
             jetzt = time.time()
-            # ---- Zustandsmaschine: nur zaehlen, wenn wirklich hoch ----
-            if klasse == 'meldung' and hoehe >= HOEHEN_SCHWELLE:
+            # ---- Zustandsmaschine: nur zaehlen, wenn die Hand WIRKLICH nach oben ging ----
+            if klasse == 'meldung' and hoch >= HOEHEN_SCHWELLE and hoch > tief:
                 if not im_hoch:
                     im_hoch = True
                     hoch_seit = jetzt
@@ -235,17 +240,22 @@ def main():
                     if dauer >= MIN_HALTEN and (jetzt - letzte_meldung) > SPERRE:
                         meldungen += 1
                         letzte_meldung = jetzt
-                        print(f">>> MELDUNG! (Hoehe {hoehe:.2f}m, oben {dauer:.1f}s)  Gesamt: {meldungen}")
+                        print(f">>> MELDUNG! (hoch {hoch:.2f}m, oben {dauer:.1f}s)  Gesamt: {meldungen}")
                     im_hoch = False
 
         # Animation (~10 Hz)
         jetzt = time.time()
         if jetzt - letzter_draw > 0.1:
             letzter_draw = jetzt
-            hand = (p.get('tisch', 0) * POS['tisch'] +
-                    p.get('kopf', 0) * POS['kopf'] +
-                    p.get('meldung', 0) * POS['meldung'])
-            zeichne(ax, hand, klasse, p, meldungen, hoehe)
+            if tief > 0.15 and tief > hoch:
+                anzeige = 'boden'
+                hand = POS['boden']
+            else:
+                anzeige = klasse
+                hand = (p.get('tisch', 0) * POS['tisch'] +
+                        p.get('kopf', 0) * POS['kopf'] +
+                        p.get('meldung', 0) * POS['meldung'])
+            zeichne(ax, hand, anzeige, p, meldungen, hoch, tief)
         plt.pause(0.02)
 
     stop.set()
