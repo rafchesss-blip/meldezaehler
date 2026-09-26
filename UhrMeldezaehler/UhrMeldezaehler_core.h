@@ -433,13 +433,17 @@ uint16_t touchStartX = 0, touchStartY = 0;
 bool showResetHint = false;
 unsigned long resetHintMs = 0;
 
+// Test-App
+char testInfo[40] = "";
+unsigned long testInfoMs = 0;
+
 // Standby + Tasten
 bool standby = false;
 bool bootBtnWasDown = false;
 unsigned long bootDownMs = 0;
 
 // App-Struktur (Launcher)
-int screen = 0;                // 0 = Watchface, 1 = Meldezähler, 2 = Einstellungen, 3 = Zifferblatt, 4 = Apps, 5 = Rekorder, 6 = Melde-Bearbeiten
+int screen = 0;                // 0 = Watchface, 1 = Meldezähler, 2 = Einstellungen, 3 = Zifferblatt, 4 = Apps, 5 = Rekorder, 6 = Melde-Bearbeiten, 7 = Zeit, 8 = Test
 int settingsItem = 0;          // 0 = Menü, 1 = Helligkeit, 2 = WLAN, 3 = Bluetooth
 int meldeEditMode = 0;         // 0 = Menü (Löschen/Hinzufügen/Bearbeiten), 1 = Bearbeiten, 2 = Richtig/Falsch
 bool calibSelectOpen = false;  // Auswahl "Was kalibrieren?" im Kalibrier-Screen
@@ -1884,33 +1888,108 @@ static void drawAppTray() {
   char buf[32];
 
   // Meldezähler
-  canvas->fillRoundRect(40, 110, 160, 140, 16, 0x18C3);
-  canvas->drawRoundRect(40, 110, 160, 140, 16, CYAN);
-  textCenterX(120, 150, "MELDE-", BLACK, 2);
-  textCenterX(120, 175, "ZAEHLER", BLACK, 2);
+  canvas->fillRoundRect(40, 100, 160, 120, 16, 0x18C3);
+  canvas->drawRoundRect(40, 100, 160, 120, 16, CYAN);
+  textCenterX(120, 135, "MELDE-", BLACK, 2);
+  textCenterX(120, 160, "ZAEHLER", BLACK, 2);
   snprintf(buf, sizeof(buf), "Heute: %d", totalHeute);
-  textCenterX(120, 205, buf, BLACK, 2);
+  textCenterX(120, 190, buf, BLACK, 2);
 
   // Rekorder
-  canvas->fillRoundRect(210, 110, 160, 140, 16, 0x9FE0);
-  canvas->drawRoundRect(210, 110, 160, 140, 16, GREEN);
-  textCenterX(290, 150, "REKORDER", BLACK, 2);
-  textCenterX(290, 180, "Sprach-", BLACK, 2);
-  textCenterX(290, 205, "notizen", BLACK, 2);
+  canvas->fillRoundRect(210, 100, 160, 120, 16, 0x9FE0);
+  canvas->drawRoundRect(210, 100, 160, 120, 16, GREEN);
+  textCenterX(290, 135, "REKORDER", BLACK, 2);
+  textCenterX(290, 165, "Sprach-", BLACK, 2);
+  textCenterX(290, 190, "notizen", BLACK, 2);
 
   // Einstellungen
-  canvas->fillRoundRect(40, 260, 160, 140, 16, 0xE5A0);
-  canvas->drawRoundRect(40, 260, 160, 140, 16, YELLOW);
-  textCenterX(120, 300, "EINSTEL-", BLACK, 2);
-  textCenterX(120, 325, "LUNGEN", BLACK, 2);
-  textCenterX(120, 355, "WiFi/BT", BLACK, 2);
+  canvas->fillRoundRect(40, 230, 160, 120, 16, 0xE5A0);
+  canvas->drawRoundRect(40, 230, 160, 120, 16, YELLOW);
+  textCenterX(120, 265, "EINSTEL-", BLACK, 2);
+  textCenterX(120, 290, "LUNGEN", BLACK, 2);
+  textCenterX(120, 320, "WiFi/BT", BLACK, 2);
 
   // Zeit
-  canvas->fillRoundRect(210, 260, 160, 140, 16, 0xD69A);
-  canvas->drawRoundRect(210, 260, 160, 140, 16, MAGENTA);
-  textCenterX(290, 300, "ZEIT", BLACK, 2);
-  textCenterX(290, 330, "Timer +", BLACK, 2);
-  textCenterX(290, 355, "Stoppuhr", BLACK, 2);
+  canvas->fillRoundRect(210, 230, 160, 120, 16, 0xD69A);
+  canvas->drawRoundRect(210, 230, 160, 120, 16, MAGENTA);
+  textCenterX(290, 265, "ZEIT", BLACK, 2);
+  textCenterX(290, 290, "Timer +", BLACK, 2);
+  textCenterX(290, 320, "Stoppuhr", BLACK, 2);
+
+  // Test (breite Kachel)
+  canvas->fillRoundRect(40, 360, 330, 72, 14, 0xBDF7);
+  canvas->drawRoundRect(40, 360, 330, 72, 14, WHITE);
+  textCenterX(205, 380, "TEST", BLACK, 3);
+  textCenterX(205, 412, "Motor/Ton/Sensor/Akku", BLACK, 2);
+
+  drawBackButton();
+}
+
+static void drawTestApp() {
+  centerText(55, "TEST", YELLOW, 3);
+  char buf[48];
+
+  // Motor
+  canvas->fillRoundRect(40, 100, 330, 64, 12, 0x18E3);
+  canvas->drawRoundRect(40, 100, 330, 64, 12, WHITE);
+  canvas->setTextSize(2);
+  canvas->setTextColor(WHITE);
+  canvas->setCursor(60, 112);
+  canvas->print("MOTOR");
+  canvas->setTextColor(CYAN);
+  canvas->setCursor(60, 138);
+  canvas->print("kurz vibrieren");
+
+  // Ton
+  canvas->fillRoundRect(40, 175, 330, 64, 12, 0x18E3);
+  canvas->drawRoundRect(40, 175, 330, 64, 12, WHITE);
+  canvas->setTextColor(WHITE);
+  canvas->setCursor(60, 187);
+  canvas->print("TON");
+  canvas->setTextColor(CYAN);
+  canvas->setCursor(60, 213);
+  canvas->print("440 Hz abspielen");
+
+  // Sensor (live)
+  canvas->fillRoundRect(40, 250, 330, 64, 12, 0x18E3);
+  canvas->drawRoundRect(40, 250, 330, 64, 12, WHITE);
+  canvas->setTextColor(WHITE);
+  canvas->setCursor(60, 262);
+  canvas->print("SENSOR");
+  if (!sensorOn) {
+    snprintf(buf, sizeof(buf), "Sensor AUS");
+  } else {
+    const char *posName[3] = {"KOPF", "MELDUNG", "TISCH"};
+    snprintf(buf, sizeof(buf), "Pos: %s  p=%d%%", posName[aktuellKlasse],
+             (int)(aktuellProb[aktuellKlasse] * 100));
+  }
+  canvas->setTextColor(CYAN);
+  canvas->setCursor(60, 288);
+  canvas->print(buf);
+
+  // Akku (live)
+  canvas->fillRoundRect(40, 325, 330, 64, 12, 0x18E3);
+  canvas->drawRoundRect(40, 325, 330, 64, 12, WHITE);
+  canvas->setTextColor(WHITE);
+  canvas->setCursor(60, 337);
+  canvas->print("AKKU");
+  uint16_t battMV = pmu.getBattVoltage();
+  if (battMV > 0) {
+    snprintf(buf, sizeof(buf), "%d%%  %.2fV  %s", cachedPct, battMV / 1000.0f,
+             pmu.isCharging() ? "laedt" : "Akku");
+  } else {
+    snprintf(buf, sizeof(buf), "kein Akku");
+  }
+  canvas->setTextColor(CYAN);
+  canvas->setCursor(60, 363);
+  canvas->print(buf);
+
+  // Status
+  if (testInfo[0] && millis() - testInfoMs < 2500) {
+    centerText(415, testInfo, GREEN, 2);
+  } else {
+    centerText(415, "Tippen = testen", 0x8410, 2);
+  }
 
   drawBackButton();
 }
@@ -2140,6 +2219,8 @@ static void renderAndFlush() {
     drawMeldeEdit();
   } else if (screen == 7) {
     drawZeitApp();
+  } else if (screen == 8) {
+    drawTestApp();
   } else { // screen == 4
     drawAppTray();
   }
@@ -2156,6 +2237,7 @@ static void appTrayTap(uint16_t x, uint16_t y);
 static void recorderTap(uint16_t x, uint16_t y);
 static void meldeEditTap(uint16_t x, uint16_t y);
 static void zeitAppTap(uint16_t x, uint16_t y);
+static void testAppTap(uint16_t x, uint16_t y);
 
 static void onTap(uint16_t x, uint16_t y) {
   USBSerial.printf("[touch] screen=%d x=%d y=%d\n", screen, x, y);
@@ -2166,6 +2248,7 @@ static void onTap(uint16_t x, uint16_t y) {
   else if (screen == 5) recorderTap(x, y);
   else if (screen == 6) meldeEditTap(x, y);
   else if (screen == 7) zeitAppTap(x, y);
+  else if (screen == 8) testAppTap(x, y);
   // screen 0 (Watchface): Tap ohne Funktion
 }
 
@@ -2288,6 +2371,8 @@ static void powerBack() {
     else screen = 0;
   } else if (screen == 7) {
     screen = 4;
+  } else if (screen == 8) {
+    screen = 4;
   }
 }
 
@@ -2363,17 +2448,38 @@ static void wfPickerTap(uint16_t x, uint16_t y) {
 
 static void appTrayTap(uint16_t x, uint16_t y) {
   if (inBackButton(x, y)) { screen = 0; return; }
-  if (inRect(x, y, 40, 110, 160, 140)) {
+  if (inRect(x, y, 40, 100, 160, 120)) {
     screen = 1;
     bufHead = bufCount = 0;
-  } else if (inRect(x, y, 210, 110, 160, 140)) {
+  } else if (inRect(x, y, 210, 100, 160, 120)) {
     screen = 5;
-  } else if (inRect(x, y, 40, 260, 160, 140)) {
+  } else if (inRect(x, y, 40, 230, 160, 120)) {
     screen = 2;
     settingsItem = 0;
-  } else if (inRect(x, y, 210, 260, 160, 140)) {
+  } else if (inRect(x, y, 210, 230, 160, 120)) {
     screen = 7;
     zeitTab = 0;
+  } else if (inRect(x, y, 40, 360, 330, 72)) {
+    screen = 8;
+  }
+}
+
+static void testAppTap(uint16_t x, uint16_t y) {
+  if (inBackButton(x, y)) { screen = 4; return; }
+  if (inRect(x, y, 40, 100, 330, 64)) {
+    vibrate(300);
+    snprintf(testInfo, sizeof(testInfo), "Motor: 300ms");
+    testInfoMs = millis();
+  } else if (inRect(x, y, 40, 175, 330, 64)) {
+    playTestTone();
+    snprintf(testInfo, sizeof(testInfo), "Ton: 440 Hz");
+    testInfoMs = millis();
+  } else if (inRect(x, y, 40, 250, 330, 64)) {
+    snprintf(testInfo, sizeof(testInfo), "Sensor-Daten oben");
+    testInfoMs = millis();
+  } else if (inRect(x, y, 40, 325, 330, 64)) {
+    snprintf(testInfo, sizeof(testInfo), "Akku-Daten oben");
+    testInfoMs = millis();
   }
 }
 
