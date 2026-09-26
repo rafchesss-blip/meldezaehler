@@ -198,6 +198,9 @@ void loop() {
   // 6) Zeit-App (Timer/Stoppuhr) aktualisieren
   updateZeitApp();
 
+  // 6b) Wecker-Vibrationsmuster (läuft, bis der Alarm gestoppt wird)
+  updateAlarm();
+
   // 7) Serielle Befehle
   handleSerial();
 }

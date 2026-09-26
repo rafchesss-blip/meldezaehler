@@ -270,19 +270,60 @@ static void waitForTap() {
 static bool vibPinInit = false;
 bool motorOn = true;   // Vibrationsmotor global an/aus (Einstellungen)
 
-static void vibrate(unsigned long ms = 120) {
-  if (!motorOn) {
-    USBSerial.printf("[vib] Motor deaktiviert (motorOn=false)\n");
-    return;
-  }
+static void motorWrite(bool on) {
   if (!vibPinInit) {
     pinMode(18, OUTPUT);   // ohne OUTPUT-Modus wuerde digitalWrite nur den Pull-up schalten
     vibPinInit = true;
   }
-  USBSerial.printf("[vib] GPIO18 HIGH fuer %lums\n", ms);
-  digitalWrite(18, HIGH);
+  digitalWrite(18, on ? HIGH : LOW);
+}
+
+// Wecker-Vibrationsmuster: 3x kurz (kurze Pausen), laengere Pause,
+// 3x kurz, laengere Pause, 2x lang (kurze Pause dazwischen), dann von vorn.
+// Gerade Indizes = Motor AN, ungerade = Motor AUS.
+static const uint16_t ALARM_PATTERN[] = {
+  150, 150, 150, 150, 150, 500,
+  150, 150, 150, 150, 150, 500,
+  400, 150, 400, 150
+};
+static const int ALARM_PATTERN_LEN = sizeof(ALARM_PATTERN) / sizeof(ALARM_PATTERN[0]);
+
+static bool alarmActive = false;
+static int alarmPatternIdx = 0;
+static unsigned long alarmNextMs = 0;
+
+static void alarmStart() {
+  alarmActive = true;
+  alarmPatternIdx = 0;
+  alarmNextMs = millis() + ALARM_PATTERN[0];
+  if (motorOn) motorWrite(true);
+}
+
+static void alarmStop() {
+  alarmActive = false;
+  motorWrite(false);
+}
+
+static void updateAlarm() {
+  if (!alarmActive) return;
+  unsigned long now = millis();
+  if ((long)(now - alarmNextMs) >= 0) {
+    alarmPatternIdx = (alarmPatternIdx + 1) % ALARM_PATTERN_LEN;
+    alarmNextMs += ALARM_PATTERN[alarmPatternIdx];
+    if (motorOn) motorWrite((alarmPatternIdx % 2) == 0);
+    else motorWrite(false);
+  }
+}
+
+static void vibrate(unsigned long ms = 120) {
+  if (alarmActive) return;   // Wecker-Muster hat Vorrang
+  if (!motorOn) {
+    USBSerial.printf("[vib] Motor deaktiviert (motorOn=false)\n");
+    return;
+  }
+  motorWrite(true);
   delay(ms);
-  digitalWrite(18, LOW);
+  motorWrite(false);
 }
 
 // ---------------------------------------------------------------------------
@@ -455,7 +496,7 @@ int meldeEditMode = 0;         // 0 = Menü (Löschen/Hinzufügen/Bearbeiten), 1
 bool calibSelectOpen = false;  // Auswahl "Was kalibrieren?" im Kalibrier-Screen
 
 // Zeit-App (Timer + Stoppuhr)
-int zeitTab = 0;               // 0 = Timer, 1 = Stoppuhr
+int zeitTab = 0;               // 0 = Timer, 1 = Stoppuhr, 2 = Alarm
 unsigned long timerSetMs = 5UL * 60UL * 1000UL;
 unsigned long timerRemainingMs = 5UL * 60UL * 1000UL;
 bool timerRunning = false;
@@ -2121,6 +2162,17 @@ static void drawCalibSelect() {
 static void drawZeitApp() {
   char buf[32];
 
+  if (zeitTab == 2) {
+    // Alarm läuft
+    centerText(120, "TIMER", YELLOW, 3);
+    centerText(200, "ABGELAUFEN!", RED, 4);
+    canvas->fillRoundRect(40, 300, 330, 90, 14, RED);
+    canvas->drawRoundRect(40, 300, 330, 90, 14, WHITE);
+    textCenterX(205, 332, "STOPPEN", WHITE, 3);
+    drawBackButton();
+    return;
+  }
+
   // Tabs
   canvas->fillRoundRect(40, 40, 160, 45, 10, zeitTab == 0 ? 0x4228 : 0x18E3);
   canvas->drawRoundRect(40, 40, 160, 45, 10, zeitTab == 0 ? YELLOW : 0x8410);
@@ -2378,6 +2430,12 @@ static void wakeFromStandby() {
 }
 
 static void powerBack() {
+  if (alarmActive) {
+    alarmStop();
+    zeitTab = 0;
+    screen = 4;
+    return;
+  }
   if (screen == 0) {
     enterStandby();
   } else if (screen == 1) {
@@ -2419,6 +2477,10 @@ static void powerShortPress() {
 }
 
 static void bootPress() {
+  if (alarmActive) {
+    alarmStop();
+    zeitTab = 0;
+  }
   USBSerial.println("[boot] Melde-Menue geoeffnet");
   if (standby) wakeFromStandby();
   screen = 6;
@@ -2460,7 +2522,11 @@ static void updateZeitApp() {
   if (d >= timerRemainingMs) {
     timerRemainingMs = 0;
     timerRunning = false;
-    vibrate(250);
+    // Wecker ausloesen: aufwachen, Alarm-Screen zeigen, Vibrationsmuster starten
+    if (standby) wakeFromStandby();
+    screen = 7;
+    zeitTab = 2;
+    alarmStart();
     USBSerial.println("[zeit] Timer abgelaufen");
   } else {
     timerRemainingMs -= d;
@@ -2632,6 +2698,15 @@ static void meldeEditTap(uint16_t x, uint16_t y) {
 }
 
 static void zeitAppTap(uint16_t x, uint16_t y) {
+  if (zeitTab == 2) {
+    // Alarm läuft: nur STOPPEN beendet ihn
+    if (inRect(x, y, 40, 300, 330, 90)) {
+      alarmStop();
+      zeitTab = 0;
+    }
+    return;
+  }
+
   if (inBackButton(x, y)) { screen = 4; return; }
 
   // Tabs
