@@ -1535,12 +1535,17 @@ static void wfMinimal() {
   dateLine(buf, sizeof(buf));
   centerText(252, buf, 0x8410, 2);
 
-  // Aktuelle Stunde
+  // Aktuelle + naechste Stunde (dezent, passend zum minimalistischen Stil)
   if (ttActive && cachedDay >= 1 && cachedMon >= 1 && cachedYr >= 0) {
     int wd = weekdayOf(cachedDay, cachedMon, 2000 + cachedYr);
     int cur = findPeriod(wd, cachedH, cachedM);
-    snprintf(buf, sizeof(buf), "%s", (cur >= 0) ? ttDays[wd][cur].name : "Pause");
-    centerText(280, buf, CYAN, 2);
+    int nxt = nextLessonIdx(wd, cachedH, cachedM);
+    char curName[24];
+    if (cur >= 0) snprintf(curName, sizeof(curName), "%s", ttDays[wd][cur].name);
+    else snprintf(curName, sizeof(curName), "Pause");
+    if (nxt >= 0) snprintf(buf, sizeof(buf), "%s | %s", curName, ttDays[wd][nxt].name);
+    else snprintf(buf, sizeof(buf), "%s", curName);
+    centerText(280, buf, 0x8410, 2);
   }
 
   canvas->drawFastHLine(110, 300, 190, 0x39C7);
