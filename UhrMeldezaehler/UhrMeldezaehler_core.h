@@ -929,6 +929,7 @@ static void evaluate() {
       if (zaehlt) {
         registerMeldung(dauer);
         letzteMeldungMs = now;
+        vibrate(120);   // haptisches Feedback am Handgelenk
         USBSerial.print(">>> MELDUNG!  Gesamt heute: ");
         USBSerial.println(totalHeute);
       }

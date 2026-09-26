@@ -18,6 +18,10 @@ void setup() {
     pmu.enableBattVoltageMeasure();
     pmu.enableVbusVoltageMeasure();
     pmu.enableSystemVoltageMeasure();
+    // Vibrationsmotor-Versorgung (DCDC4/LX4) einschalten, sonst hat der
+    // Motor trotz gesetztem GPIO18 keine Spannung.
+    pmu.enableDC4();
+    pmu.setDC4Voltage(1800);
   }
   USBSerial.printf("PMU AXP2101: %s\n", pmuOk ? "OK" : "FEHLER");
   Wire.setClock(400000);
