@@ -2,8 +2,9 @@
 # Build-Skript für den Meldezähler.
 #
 #   ./build.sh firmware   – Firmware kompilieren (UhrMeldezaehler)
+#   ./build.sh upload     – Firmware kompilieren + auf die Uhr flashen
 #   ./build.sh app        – Flutter-APKs bauen und ins Projektverzeichnis kopieren
-#   ./build.sh all        – beides (Standard)
+#   ./build.sh all        – Firmware + App (Standard)
 #
 # Voraussetzungen: arduino-cli + esp32-Core, Flutter SDK.
 
@@ -30,11 +31,19 @@ build_app() {
   cp -v MeldeApp/build/app/outputs/flutter-apk/app-release.apk            Meldezaehler-App-universal.apk
 }
 
+upload_firmware() {
+  local port="${PORT:-/dev/ttyACM0}"
+  echo "==> Kompiliere + flashe Firmware (${FQBN}) auf ${port} ..."
+  arduino-cli compile --fqbn "${FQBN}" "${SKETCH}"
+  arduino-cli upload  --fqbn "${FQBN}" -p "${port}" "${SKETCH}"
+}
+
 case "${1:-all}" in
   firmware) build_firmware ;;
+  upload)   upload_firmware ;;
   app)      build_app ;;
   all)      build_firmware; build_app ;;
-  *) echo "Unbekannt: $1 (erwartet: firmware, app, all)"; exit 2 ;;
+  *) echo "Unbekannt: $1 (erwartet: firmware, upload, app, all)"; exit 2 ;;
 esac
 
 echo "==> Fertig."
