@@ -268,7 +268,13 @@ static void waitForTap() {
 // Vibrationsmotor (GPIO18 steuert den Motor über einen Transistor)
 // ---------------------------------------------------------------------------
 static bool vibPinInit = false;
+bool motorOn = true;   // Vibrationsmotor global an/aus (Einstellungen)
+
 static void vibrate(unsigned long ms = 120) {
+  if (!motorOn) {
+    USBSerial.printf("[vib] Motor deaktiviert (motorOn=false)\n");
+    return;
+  }
   if (!vibPinInit) {
     pinMode(18, OUTPUT);   // ohne OUTPUT-Modus wuerde digitalWrite nur den Pull-up schalten
     vibPinInit = true;
@@ -746,6 +752,26 @@ static void removeLastMeldung() {
   prefs.putInt("seitCalib", meldungenSeitCalib);
   prefs.putULong("meldezeit", meldeZeitMs);
   USBSerial.printf("Letzte Meldung geloescht. Heute: %d\n", totalHeute);
+}
+
+// Alle Meldungen/Statistiken des Tages zuruecksetzen (Kalibrierung + Stundenplan bleiben)
+static void resetAllStats() {
+  totalHeute = 0;
+  sessionCount = 0;
+  minuteCount = 0;
+  meldeZeitMs = 0;
+  drange = 0;
+  richtig = 0;
+  falsch = 0;
+  for (int i = 0; i < 60; i++) minHist[i] = 0;
+  meldLogCount = 0;
+  meldLogWrite = 0;
+  prefs.putInt("total", 0);
+  prefs.putULong("meldezeit", 0);
+  prefs.putInt("drange", 0);
+  prefs.putInt("richtig", 0);
+  prefs.putInt("falsch", 0);
+  USBSerial.println("Alle Meldungen geloescht.");
 }
 
 static void clearTimetable() {
@@ -1584,25 +1610,32 @@ static void setSensorOn(bool on) {
   USBSerial.printf("Sensor %s\n", on ? "AN" : "AUS");
 }
 
+static void setMotorOn(bool on) {
+  motorOn = on;
+  prefs.putInt("motorOn", on ? 1 : 0);
+  USBSerial.printf("Motor %s\n", on ? "AN" : "AUS");
+}
+
 static void drawSettingsMenu() {
   centerText(70, "EINSTELLUNGEN", YELLOW, 3);
-  const char *items[4] = {"Helligkeit", "WLAN", "Bluetooth", "Sensor"};
-  for (int i = 0; i < 4; i++) {
-    int ry = 145 + i * 72;
-    canvas->fillRoundRect(40, ry, 330, 64, 12, 0x18E3);
-    canvas->drawRoundRect(40, ry, 330, 64, 12, WHITE);
+  const char *items[5] = {"Helligkeit", "WLAN", "Bluetooth", "Sensor", "Motor"};
+  for (int i = 0; i < 5; i++) {
+    int ry = 118 + i * 68;
+    canvas->fillRoundRect(40, ry, 330, 60, 12, 0x18E3);
+    canvas->drawRoundRect(40, ry, 330, 60, 12, WHITE);
     char buf[48];
     if (i == 0) snprintf(buf, sizeof(buf), "Helligkeit   %d%%", brightness * 100 / 255);
     else if (i == 1) snprintf(buf, sizeof(buf), "WLAN   %s", WiFi.status() == WL_CONNECTED ? "verbunden" : "aus");
     else if (i == 2) snprintf(buf, sizeof(buf), "Bluetooth   %s", btOn ? "an" : "aus");
-    else snprintf(buf, sizeof(buf), "Sensor   %s", sensorOn ? "an" : "aus");
+    else if (i == 3) snprintf(buf, sizeof(buf), "Sensor   %s", sensorOn ? "an" : "aus");
+    else snprintf(buf, sizeof(buf), "Motor   %s", motorOn ? "an" : "aus");
     canvas->setTextSize(2);
     canvas->setTextColor(WHITE);
-    canvas->setCursor(60, ry + 22);
+    canvas->setCursor(60, ry + 20);
     canvas->print(buf);
   }
   drawHomeButton();
-  centerText(460, "Tippen = auswaehlen", 0x8410, 2);
+  centerText(462, "Tippen = auswaehlen", 0x8410, 2);
 }
 
 static void drawBrightness() {
@@ -1798,6 +1831,25 @@ static void drawSensor() {
   drawHomeButton();
 }
 
+static void drawMotor() {
+  centerText(55, "MOTOR", YELLOW, 3);
+  if (motorOn) {
+    centerText(130, "Vibration aktiv", GREEN, 3);
+    centerText(180, "Feedback bei Meldung", WHITE, 2);
+    centerText(210, "Timer + Tests", WHITE, 2);
+  } else {
+    centerText(130, "Deaktiviert", 0x8410, 3);
+    centerText(180, "keine Vibration", WHITE, 2);
+    centerText(210, "spart Energie", WHITE, 2);
+  }
+  canvas->fillRoundRect(60, 300, 120, 70, 12, GREEN);
+  textCenterX(120, 322, "AN", BLACK, 3);
+  canvas->fillRoundRect(230, 300, 120, 70, 12, RED);
+  textCenterX(290, 322, "AUS", BLACK, 3);
+  drawBackButton();
+  drawHomeButton();
+}
+
 #define BLE_SERVICE_UUID     "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
 #define BLE_CHAR_TIME_UUID   "beb5483e-36e1-4688-b7f5-ea07361b26a8"
 #define BLE_CHAR_STATS_UUID  "beb5483e-36e1-4688-b7f5-ea07361b26a9"
@@ -1823,21 +1875,7 @@ class MeldeBleCallbacks : public BLECharacteristicCallbacks {
         USBSerial.println("Zeit/Datum per BLE gesetzt");
       }
     } else if (pChar == pCharClear) {
-      totalHeute = 0;
-      sessionCount = 0;
-      minuteCount = 0;
-      meldeZeitMs = 0;
-      drange = 0;
-      richtig = 0;
-      falsch = 0;
-      for (int i = 0; i < 60; i++) minHist[i] = 0;
-      meldLogCount = 0;
-      meldLogWrite = 0;
-      prefs.putInt("total", 0);
-      prefs.putULong("meldezeit", 0);
-      prefs.putInt("drange", 0);
-      prefs.putInt("richtig", 0);
-      prefs.putInt("falsch", 0);
+      resetAllStats();
       USBSerial.println("Statistik per BLE geloescht");
     } else if (pChar == pCharTT) {
       handleTTCommand(pChar->getValue());
@@ -2144,21 +2182,25 @@ static void drawMeldeEdit() {
   char buf[48];
 
   if (meldeEditMode == 0) {
-    centerText(70, "MELDUNGEN", YELLOW, 3);
+    centerText(60, "MELDUNGEN", YELLOW, 3);
     snprintf(buf, sizeof(buf), "Heute: %d", totalHeute);
-    centerText(112, buf, WHITE, 2);
+    centerText(100, buf, WHITE, 2);
 
-    canvas->fillRoundRect(40, 140, 330, 70, 14, 0x4228);
-    canvas->drawRoundRect(40, 140, 330, 70, 14, RED);
-    textCenterX(205, 162, "LOESCHEN", WHITE, 3);
+    canvas->fillRoundRect(40, 128, 330, 66, 14, 0x4228);
+    canvas->drawRoundRect(40, 128, 330, 66, 14, RED);
+    textCenterX(205, 149, "LETZTE LOESCHEN", WHITE, 3);
 
-    canvas->fillRoundRect(40, 225, 330, 70, 14, 0x18E3);
-    canvas->drawRoundRect(40, 225, 330, 70, 14, GREEN);
-    textCenterX(205, 247, "HINZUFUEGEN", WHITE, 3);
+    canvas->fillRoundRect(40, 204, 330, 66, 14, 0x18E3);
+    canvas->drawRoundRect(40, 204, 330, 66, 14, GREEN);
+    textCenterX(205, 225, "HINZUFUEGEN", WHITE, 3);
 
-    canvas->fillRoundRect(40, 310, 330, 70, 14, 0x18E3);
-    canvas->drawRoundRect(40, 310, 330, 70, 14, CYAN);
-    textCenterX(205, 332, "BEARBEITEN", WHITE, 3);
+    canvas->fillRoundRect(40, 280, 330, 66, 14, 0x18E3);
+    canvas->drawRoundRect(40, 280, 330, 66, 14, CYAN);
+    textCenterX(205, 301, "BEARBEITEN", WHITE, 3);
+
+    canvas->fillRoundRect(40, 356, 330, 66, 14, 0x4228);
+    canvas->drawRoundRect(40, 356, 330, 66, 14, RED);
+    textCenterX(205, 377, "ALLE LOESCHEN", WHITE, 3);
 
     drawBackButton();
     if (totalHeute <= 0) centerText(452, "Keine Meldung vorhanden", RED, 2);
@@ -2215,7 +2257,8 @@ static void renderAndFlush() {
       else drawWifi();
     }
     else if (settingsItem == 3) drawBluetooth();
-    else drawSensor();
+    else if (settingsItem == 4) drawSensor();
+    else drawMotor();
   } else if (screen == 3) {
     drawWfPicker();
   } else if (screen == 5) {
@@ -2259,21 +2302,7 @@ static void onTap(uint16_t x, uint16_t y) {
 
 static void onLongPress(uint16_t x, uint16_t y) {
   if (screen == 1 && view == 0 && !inHomeButton(x, y)) {
-    totalHeute = 0;
-    sessionCount = 0;
-    minuteCount = 0;
-    meldeZeitMs = 0;
-    drange = 0;
-    richtig = 0;
-    falsch = 0;
-    for (int i = 0; i < 60; i++) minHist[i] = 0;
-    meldLogCount = 0;
-    meldLogWrite = 0;
-    prefs.putInt("total", 0);
-    prefs.putULong("meldezeit", 0);
-    prefs.putInt("drange", 0);
-    prefs.putInt("richtig", 0);
-    prefs.putInt("falsch", 0);
+    resetAllStats();
     showResetHint = true;
     resetHintMs = millis();
     USBSerial.println("Tageszaehler zurueckgesetzt.");
@@ -2556,13 +2585,13 @@ static void meldeEditTap(uint16_t x, uint16_t y) {
   }
 
   if (meldeEditMode == 0) {
-    if (inRect(x, y, 40, 140, 330, 70)) {
+    if (inRect(x, y, 40, 128, 330, 66)) {
       removeLastMeldung();
-    } else if (inRect(x, y, 40, 225, 330, 70)) {
+    } else if (inRect(x, y, 40, 204, 330, 66)) {
       registerMeldung();
       meldeEditMode = 1;
       USBSerial.println("Meldung hinzugefuegt -> bearbeiten.");
-    } else if (inRect(x, y, 40, 310, 330, 70)) {
+    } else if (inRect(x, y, 40, 280, 330, 66)) {
       if (totalHeute > 0) {
         meldeEditMode = 1;
       } else {
@@ -2570,6 +2599,10 @@ static void meldeEditTap(uint16_t x, uint16_t y) {
         resetHintMs = millis();
         USBSerial.println("Keine Meldung zum Bearbeiten.");
       }
+    } else if (inRect(x, y, 40, 356, 330, 66)) {
+      resetAllStats();
+      showResetHint = true;
+      resetHintMs = millis();
     }
   } else if (meldeEditMode == 1) {
     if (inRect(x, y, 40, 165, 330, 95)) {
@@ -2694,10 +2727,11 @@ static void settingsTap(uint16_t x, uint16_t y) {
   if (inHomeButton(x, y)) { screen = 0; return; }
 
   if (settingsItem == 0) {
-    if (inRect(x, y, 40, 145, 330, 64)) settingsItem = 1;
-    else if (inRect(x, y, 40, 217, 330, 64)) settingsItem = 2;
-    else if (inRect(x, y, 40, 289, 330, 64)) settingsItem = 3;
-    else if (inRect(x, y, 40, 361, 330, 64)) settingsItem = 4;
+    if (inRect(x, y, 40, 118, 330, 60)) settingsItem = 1;
+    else if (inRect(x, y, 40, 186, 330, 60)) settingsItem = 2;
+    else if (inRect(x, y, 40, 254, 330, 60)) settingsItem = 3;
+    else if (inRect(x, y, 40, 322, 330, 60)) settingsItem = 4;
+    else if (inRect(x, y, 40, 390, 330, 60)) settingsItem = 5;
   } else if (settingsItem == 1) {
     if (inBackButton(x, y)) settingsItem = 0;
     else if (inRect(x, y, 60, 360, 100, 70)) { brightness -= 20; if (brightness < 10) brightness = 10; applyBrightness(); }
@@ -2735,6 +2769,10 @@ static void settingsTap(uint16_t x, uint16_t y) {
     if (inBackButton(x, y)) settingsItem = 0;
     else if (inRect(x, y, 60, 300, 120, 70)) setSensorOn(true);
     else if (inRect(x, y, 230, 300, 120, 70)) setSensorOn(false);
+  } else if (settingsItem == 5) {
+    if (inBackButton(x, y)) settingsItem = 0;
+    else if (inRect(x, y, 60, 300, 120, 70)) setMotorOn(true);
+    else if (inRect(x, y, 230, 300, 120, 70)) setMotorOn(false);
   }
 }
 
@@ -2749,21 +2787,7 @@ static void handleSerial() {
       line.trim();
       if (line.length()) {
         if (line == "RESET") {
-          totalHeute = 0;
-          sessionCount = 0;
-          minuteCount = 0;
-          meldeZeitMs = 0;
-          drange = 0;
-          richtig = 0;
-          falsch = 0;
-          for (int i = 0; i < 60; i++) minHist[i] = 0;
-          meldLogCount = 0;
-          meldLogWrite = 0;
-          prefs.putInt("total", 0);
-          prefs.putULong("meldezeit", 0);
-          prefs.putInt("drange", 0);
-          prefs.putInt("richtig", 0);
-          prefs.putInt("falsch", 0);
+          resetAllStats();
           USBSerial.println("OK total=0");
         } else if (line == "CALCLEAR") {
           clearCalibration();
