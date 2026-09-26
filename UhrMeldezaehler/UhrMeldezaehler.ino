@@ -60,6 +60,7 @@ void setup() {
   sensorOn = prefs.getInt("sensorOn", 1) == 1;
   motorOn = prefs.getInt("motorOn", 1) == 1;
   muteInLessons = prefs.getInt("muteLessons", 0) == 1;
+  lastSession = prefs.getInt("lastSession", 0);
   gfx->setBrightness(brightness);
 
   // Stundenplan + Stunden-Statistik aus NVS laden

@@ -356,6 +356,7 @@ class _HomePageState extends State<HomePage> {
                     _aktuelleStunde(),
                     _statRow("Meldungen heute", _stats?['total']),
                     _statRow("In Session", _stats?['session']),
+                    _statRow("Letzte Session", _stats?['lastSession']),
                     _statRow("Seit Kalibrierung", _stats?['seitCalib']),
                     _statRow("Drangenommen", _stats?['drange']),
                     _statRow("Richtig / Falsch", _richtigFalschText(_stats)),

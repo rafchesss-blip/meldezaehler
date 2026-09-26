@@ -452,6 +452,7 @@ float aktuellScore = -1.0f;
 // Statistik
 int totalHeute = 0;
 int sessionCount = 0;
+int lastSession = 0;   // letzte abgeschlossene Session (wird an die App uebertragen)
 int minHist[60] = {0};
 int minHistIdx = 0;
 int minuteCount = 0;
@@ -482,6 +483,7 @@ int view = 0;                  // 0 = Zähler, 1 = Statistik
 int watchface = 0;             // aktuelles Watchface (0..5)
 int watchfaceSel = 0;          // Auswahl im Zifferblatt-Picker
 bool touchWasDown = false;
+bool touchHoldFired = false;   // Watchface-Halten wurde bereits ausgeloest
 unsigned long touchDownMs = 0;
 uint16_t touchX = 0, touchY = 0;
 uint16_t touchStartX = 0, touchStartY = 0;
@@ -572,6 +574,7 @@ static String buildStatsJson() {
   String s = "{";
   s += "\"total\":" + String(totalHeute) + ",";
   s += "\"session\":" + String(sessionCount) + ",";
+  s += "\"lastSession\":" + String(lastSession) + ",";
   s += "\"seitCalib\":" + String(meldungenSeitCalib) + ",";
   s += "\"drange\":" + String(drange) + ",";
   s += "\"richtig\":" + String(richtig) + ",";
@@ -648,9 +651,11 @@ static void updateEnv() {
     inLesson = (curP >= 0);
   }
 
-  // Session bei Stundenwechsel automatisch zurücksetzen
+  // Session bei Stundenwechsel automatisch zurücksetzen (alte Session sichern)
   if (curWd != lastLessonDay || curP != lastLessonIdx) {
     if (lastLessonDay != -1) {
+      lastSession = sessionCount;
+      prefs.putInt("lastSession", lastSession);
       sessionCount = 0;
       USBSerial.println("[stunde] Neue Stunde -> Session zurueckgesetzt");
     }
@@ -1529,6 +1534,15 @@ static void wfMinimal() {
   centerText(165, buf, WHITE, 5);
   dateLine(buf, sizeof(buf));
   centerText(252, buf, 0x8410, 2);
+
+  // Aktuelle Stunde
+  if (ttActive && cachedDay >= 1 && cachedMon >= 1 && cachedYr >= 0) {
+    int wd = weekdayOf(cachedDay, cachedMon, 2000 + cachedYr);
+    int cur = findPeriod(wd, cachedH, cachedM);
+    snprintf(buf, sizeof(buf), "%s", (cur >= 0) ? ttDays[wd][cur].name : "Pause");
+    centerText(280, buf, CYAN, 2);
+  }
+
   canvas->drawFastHLine(110, 300, 190, 0x39C7);
   if (cachedPct >= 0)
     snprintf(buf, sizeof(buf), "%d%%  |  %d Meldungen", cachedPct, totalHeute);
@@ -2543,11 +2557,22 @@ static void handleTouch() {
   bool down = touchRead(x, y);
   if (down && !touchWasDown) {
     touchWasDown = true;
+    touchHoldFired = false;
     touchDownMs = millis();
     touchStartX = x; touchStartY = y;
     touchX = x; touchY = y;
   } else if (down && touchWasDown) {
     touchX = x; touchY = y;
+    // Watchface: nach 2 s Halten automatisch öffnen (ohne loszulassen) + kurz vibrieren
+    if (!touchHoldFired && screen == 0 && millis() - touchDownMs >= WATCHFACE_HOLD_MS) {
+      int16_t dx = (int16_t)touchX - (int16_t)touchStartX;
+      int16_t dy = (int16_t)touchY - (int16_t)touchStartY;
+      if (abs(dx) < 40 && abs(dy) < 40) {
+        touchHoldFired = true;
+        vibrate(80);
+        onVeryLongPress(touchX, touchY);
+      }
+    }
   } else if (!down && touchWasDown) {
     touchWasDown = false;
     unsigned long dauer = millis() - touchDownMs;
@@ -2555,7 +2580,9 @@ static void handleTouch() {
     int16_t dy = (int16_t)touchY - (int16_t)touchStartY;
     bool still = (abs(dx) < 40 && abs(dy) < 40);
 
-    if (dauer > WATCHFACE_HOLD_MS && still) {
+    if (touchHoldFired) {
+      // bereits beim Halten ausgelöst -> beim Loslassen nichts mehr tun
+    } else if (dauer > WATCHFACE_HOLD_MS && still) {
       onVeryLongPress(touchX, touchY);
     } else if (abs(dy) > SWIPE_DIST && abs(dy) > abs(dx) && dauer < WATCHFACE_HOLD_MS) {
       if (dy < 0) onSwipeUp(touchX, touchY);
