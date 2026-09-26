@@ -2067,14 +2067,14 @@ static void drawWfPicker() {
 
 static void drawCalibSelect() {
   centerText(60, "WAS KALIBRIEREN?", YELLOW, 3);
-  const char *items[5] = {"KOMPLETT (alles)", "Arm UNTEN", "Arm HOCH", "NICHT MELDEN", "TISCH (Uhr auf Tisch)"};
-  for (int i = 0; i < 5; i++) {
-    int y = 110 + i * 64;
-    canvas->fillRoundRect(40, y, 330, 56, 10, 0x18E3);
-    canvas->drawRoundRect(40, y, 330, 56, 10, i == 0 ? YELLOW : 0x8410);
+  const char *items[6] = {"KOMPLETT (alles)", "Arm UNTEN", "Arm HOCH", "NICHT MELDEN", "TISCH (Uhr auf Tisch)", "LOESCHEN + Neustart"};
+  for (int i = 0; i < 6; i++) {
+    int y = 96 + i * 56;
+    canvas->fillRoundRect(40, y, 330, 50, 10, 0x18E3);
+    canvas->drawRoundRect(40, y, 330, 50, 10, i == 0 ? YELLOW : (i == 5 ? RED : 0x8410));
     canvas->setTextSize(2);
-    canvas->setTextColor(i == 0 ? YELLOW : WHITE);
-    canvas->setCursor(60, y + 17);
+    canvas->setTextColor(i == 0 ? YELLOW : (i == 5 ? RED : WHITE));
+    canvas->setCursor(60, y + 15);
     canvas->print(items[i]);
   }
   drawBackButton();
@@ -2168,10 +2168,15 @@ static void drawMeldeEdit() {
     snprintf(buf, sizeof(buf), "Heute: %d", totalHeute);
     centerText(112, buf, WHITE, 2);
 
-    canvas->fillRoundRect(40, 180, 330, 110, 16, 0x18E3);
-    canvas->drawRoundRect(40, 180, 330, 110, 16, GREEN);
-    textCenterX(205, 215, "DRANGENOMMEN", WHITE, 3);
-    centerText(258, "als aufgerufen markieren", 0x8410, 2);
+    canvas->fillRoundRect(40, 165, 330, 95, 16, 0x18E3);
+    canvas->drawRoundRect(40, 165, 330, 95, 16, GREEN);
+    textCenterX(205, 200, "DRANGENOMMEN", WHITE, 3);
+    centerText(240, "als aufgerufen markieren", 0x8410, 2);
+
+    canvas->fillRoundRect(40, 275, 330, 95, 16, 0x4228);
+    canvas->drawRoundRect(40, 275, 330, 95, 16, CYAN);
+    textCenterX(205, 310, "FERTIG", WHITE, 3);
+    centerText(350, "nicht aufgerufen", 0x8410, 2);
 
     drawBackButton();
   } else {
@@ -2503,9 +2508,19 @@ static void calibSelectTap(uint16_t x, uint16_t y) {
     calibSelectOpen = false;
     return;
   }
-  for (int i = 0; i < 5; i++) {
-    int ry = 110 + i * 64;
-    if (inRect(x, y, 40, ry, 330, 56)) {
+  for (int i = 0; i < 6; i++) {
+    int ry = 96 + i * 56;
+    if (inRect(x, y, 40, ry, 330, 50)) {
+      if (i == 5) {
+        // Kalibrierung loeschen und neu starten -> Erst-Kalibrierung beim naechsten Boot
+        calibSelectOpen = false;
+        clearCalibration();
+        USBSerial.println("Kalibrierung geloescht, Neustart ...");
+        USBSerial.flush();
+        delay(200);
+        ESP.restart();
+        return;
+      }
       calibSelectOpen = false;
       if (i == 0) runCalibration();          // alles
       else runCalibrationPart(i);            // 1=N, 2=H, 3=NICHT MELDEN, 4=TISCH
@@ -2557,11 +2572,16 @@ static void meldeEditTap(uint16_t x, uint16_t y) {
       }
     }
   } else if (meldeEditMode == 1) {
-    if (inRect(x, y, 40, 180, 330, 110)) {
+    if (inRect(x, y, 40, 165, 330, 95)) {
       drange++;
       saveMeldeExtras();
       meldeEditMode = 2;
       USBSerial.println("Drangenommen +1");
+    } else if (inRect(x, y, 40, 275, 330, 95)) {
+      // nicht aufgerufen -> fertig, zurueck zum Watchface
+      meldeEditMode = 0;
+      screen = 0;
+      USBSerial.println("Fertig (nicht aufgerufen).");
     }
   } else if (meldeEditMode == 2) {
     if (inRect(x, y, 40, 180, 330, 90)) {
