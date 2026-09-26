@@ -268,7 +268,9 @@ static void waitForTap() {
 // Vibrationsmotor (GPIO18 steuert den Motor über einen Transistor)
 // ---------------------------------------------------------------------------
 static bool vibPinInit = false;
-bool motorOn = true;   // Vibrationsmotor global an/aus (Einstellungen)
+bool motorOn = true;          // Vibrationsmotor global an/aus (Einstellungen)
+bool muteInLessons = false;   // Stummschaltung während Unterrichtsstunden
+bool inLesson = false;        // wird in updateEnv() aktualisiert
 
 static void motorWrite(bool on) {
   if (!vibPinInit) {
@@ -276,6 +278,12 @@ static void motorWrite(bool on) {
     vibPinInit = true;
   }
   digitalWrite(18, on ? HIGH : LOW);
+}
+
+static bool vibrationAllowed() {
+  if (!motorOn) return false;
+  if (muteInLessons && inLesson) return false;
+  return true;
 }
 
 // Wecker-Vibrationsmuster: 3x kurz (kurze Pausen), laengere Pause,
@@ -317,8 +325,8 @@ static void updateAlarm() {
 
 static void vibrate(unsigned long ms = 120) {
   if (alarmActive) return;   // Wecker-Muster hat Vorrang
-  if (!motorOn) {
-    USBSerial.printf("[vib] Motor deaktiviert (motorOn=false)\n");
+  if (!vibrationAllowed()) {
+    USBSerial.printf("[vib] Vibration unterdrueckt\n");
     return;
   }
   motorWrite(true);
@@ -471,7 +479,7 @@ static int meldLogCount = 0;
 
 // UI
 int view = 0;                  // 0 = Zähler, 1 = Statistik
-int watchface = 0;             // aktuelles Watchface (0..4)
+int watchface = 0;             // aktuelles Watchface (0..5)
 int watchfaceSel = 0;          // Auswahl im Zifferblatt-Picker
 bool touchWasDown = false;
 unsigned long touchDownMs = 0;
@@ -524,6 +532,11 @@ bool sensorOn = true;
 static int cachedH = -1, cachedM = -1, cachedS = -1;
 static int cachedDay = -1, cachedMon = -1, cachedYr = -1, cachedPct = -1;
 static unsigned long lastEnvMs = 0;
+
+// Akku-Warnung + Stunden-Auto-Reset
+static bool battWarned = false;
+static int lastLessonDay = -1;
+static int lastLessonIdx = -1;
 
 // ---------------------------------------------------------------------------
 // Stundenplan (Timetable) – wird im SPIFFS gespeichert
@@ -600,6 +613,8 @@ static int weekdayOf(int d, int m, int y) {
   return (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
 }
 
+static int findPeriod(int day, int h, int m);  // Vorabdeklaration (Definition weiter unten)
+
 static void updateEnv() {
   unsigned long now = millis();
   if (now - lastEnvMs < 1000) return;
@@ -613,6 +628,36 @@ static void updateEnv() {
     cachedDay = cachedMon = cachedYr = -1;
   }
   cachedPct = pmu.isBatteryConnect() ? pmu.getBatteryPercent() : -1;
+
+  // Akku-Warnung: einmalig vibrieren, wenn unter 20 %
+  if (cachedPct >= 0 && cachedPct < 20 && !battWarned) {
+    battWarned = true;
+    vibrate(150);
+    delay(120);
+    vibrate(150);
+    USBSerial.printf("[akku] WARNUNG: nur noch %d%%\n", cachedPct);
+  }
+  if (cachedPct >= 25) battWarned = false;
+
+  // Aktuelle Stunde bestimmen (für Mute + Session-Auto-Reset)
+  inLesson = false;
+  int curWd = -1, curP = -1;
+  if (ttActive && cachedDay >= 1 && cachedMon >= 1 && cachedYr >= 0) {
+    curWd = weekdayOf(cachedDay, cachedMon, 2000 + cachedYr);
+    curP = findPeriod(curWd, cachedH, cachedM);
+    inLesson = (curP >= 0);
+  }
+
+  // Session bei Stundenwechsel automatisch zurücksetzen
+  if (curWd != lastLessonDay || curP != lastLessonIdx) {
+    if (lastLessonDay != -1) {
+      sessionCount = 0;
+      USBSerial.println("[stunde] Neue Stunde -> Session zurueckgesetzt");
+    }
+    lastLessonDay = curWd;
+    lastLessonIdx = curP;
+  }
+
   if (pCharStats) pCharStats->setValue(buildStatsJson().c_str());
   if (pCharLesson) pCharLesson->setValue(buildLessonJson().c_str());
 }
@@ -707,6 +752,16 @@ static int findPeriod(int day, int h, int m) {
     int s = ttDays[day][p].sh * 60 + ttDays[day][p].sm;
     int e = ttDays[day][p].eh * 60 + ttDays[day][p].em;
     if (cur >= s && cur < e) return p;
+  }
+  return -1;
+}
+
+// Nächste Stunde nach der aktuellen Zeit (Index, -1 = keine weitere heute)
+static int nextLessonIdx(int day, int h, int m) {
+  int cur = h * 60 + m;
+  for (int p = 0; p < ttCount[day]; p++) {
+    int s = ttDays[day][p].sh * 60 + ttDays[day][p].sm;
+    if (s > cur) return p;
   }
   return -1;
 }
@@ -1616,13 +1671,81 @@ static void wfGeometric() {
   canvas->print(buf);
 }
 
+// 5) Schule (Stundenplan + Statistik)
+static void wfSchool() {
+  char buf[48];
+
+  timeLine(buf, sizeof(buf), false);
+  centerText(48, buf, WHITE, 5);
+
+  dateLine(buf, sizeof(buf));
+  centerText(104, buf, 0x8410, 2);
+
+  if (ttActive && cachedDay >= 1 && cachedMon >= 1 && cachedYr >= 0) {
+    int wd = weekdayOf(cachedDay, cachedMon, 2000 + cachedYr);
+    int cur = findPeriod(wd, cachedH, cachedM);
+    int nxt = nextLessonIdx(wd, cachedH, cachedM);
+
+    canvas->fillRoundRect(30, 132, 350, 96, 12, 0x2104);
+    canvas->drawRoundRect(30, 132, 350, 96, 12, CYAN);
+    canvas->setTextSize(2);
+    canvas->setTextColor(CYAN);
+    canvas->setCursor(45, 148);
+    canvas->print("JETZT");
+    canvas->setTextColor(WHITE);
+    canvas->setCursor(45, 174);
+    if (cur >= 0) {
+      snprintf(buf, sizeof(buf), "%s", ttDays[wd][cur].name);
+      canvas->print(buf);
+      snprintf(buf, sizeof(buf), "%02d:%02d - %02d:%02d",
+               ttDays[wd][cur].sh, ttDays[wd][cur].sm,
+               ttDays[wd][cur].eh, ttDays[wd][cur].em);
+      canvas->setTextColor(0x8410);
+      canvas->setCursor(45, 200);
+      canvas->print(buf);
+    } else {
+      canvas->print("Pause / frei");
+    }
+
+    if (nxt >= 0) {
+      canvas->setTextSize(2);
+      canvas->setTextColor(YELLOW);
+      canvas->setCursor(45, 250);
+      canvas->print("DANACH");
+      snprintf(buf, sizeof(buf), "%s  %02d:%02d", ttDays[wd][nxt].name,
+               ttDays[wd][nxt].sh, ttDays[wd][nxt].sm);
+      canvas->setTextColor(WHITE);
+      canvas->setCursor(45, 276);
+      canvas->print(buf);
+    }
+  } else {
+    centerText(170, "kein Stundenplan", 0x8410, 2);
+    centerText(200, "App -> Stundenplan senden", 0x8410, 2);
+  }
+
+  canvas->drawFastHLine(60, 306, 290, 0x39C7);
+  snprintf(buf, sizeof(buf), "%d Meldungen heute", totalHeute);
+  centerText(336, buf, YELLOW, 2);
+  snprintf(buf, sizeof(buf), "Session: %d", sessionCount);
+  centerText(366, buf, CYAN, 2);
+  drawBatteryIcon(45, 398, 120, 36, cachedPct >= 0 ? cachedPct : 0);
+  if (cachedPct >= 0) {
+    snprintf(buf, sizeof(buf), "%d%%", cachedPct);
+    canvas->setTextSize(2);
+    canvas->setTextColor(WHITE);
+    canvas->setCursor(175, 406);
+    canvas->print(buf);
+  }
+}
+
 static void drawWatchface() {
   switch (watchface) {
     case 0: wfMinimal(); break;
     case 1: wfColorful(); break;
     case 2: wfAnalog(); break;
     case 3: wfBig(); break;
-    default: wfGeometric(); break;
+    case 4: wfGeometric(); break;
+    default: wfSchool(); break;
   }
 }
 
@@ -1655,6 +1778,12 @@ static void setMotorOn(bool on) {
   motorOn = on;
   prefs.putInt("motorOn", on ? 1 : 0);
   USBSerial.printf("Motor %s\n", on ? "AN" : "AUS");
+}
+
+static void setMuteInLessons(bool on) {
+  muteInLessons = on;
+  prefs.putInt("muteLessons", on ? 1 : 0);
+  USBSerial.printf("Stumm in Stunden %s\n", on ? "AN" : "AUS");
 }
 
 static void drawSettingsMenu() {
@@ -1873,20 +2002,27 @@ static void drawSensor() {
 }
 
 static void drawMotor() {
-  centerText(55, "MOTOR", YELLOW, 3);
-  if (motorOn) {
-    centerText(130, "Vibration aktiv", GREEN, 3);
-    centerText(180, "Feedback bei Meldung", WHITE, 2);
-    centerText(210, "Timer + Tests", WHITE, 2);
-  } else {
-    centerText(130, "Deaktiviert", 0x8410, 3);
-    centerText(180, "keine Vibration", WHITE, 2);
-    centerText(210, "spart Energie", WHITE, 2);
-  }
-  canvas->fillRoundRect(60, 300, 120, 70, 12, GREEN);
-  textCenterX(120, 322, "AN", BLACK, 3);
-  canvas->fillRoundRect(230, 300, 120, 70, 12, RED);
-  textCenterX(290, 322, "AUS", BLACK, 3);
+  centerText(50, "MOTOR", YELLOW, 3);
+
+  centerText(98, "Vibration", WHITE, 2);
+  canvas->fillRoundRect(60, 122, 120, 60, 12, motorOn ? GREEN : 0x4228);
+  canvas->drawRoundRect(60, 122, 120, 60, 12, WHITE);
+  textCenterX(120, 142, "AN", motorOn ? BLACK : WHITE, 3);
+  canvas->fillRoundRect(230, 122, 120, 60, 12, !motorOn ? RED : 0x4228);
+  canvas->drawRoundRect(230, 122, 120, 60, 12, WHITE);
+  textCenterX(290, 142, "AUS", !motorOn ? BLACK : WHITE, 3);
+
+  centerText(218, "Stumm in Stunden", WHITE, 2);
+  canvas->fillRoundRect(60, 242, 120, 60, 12, muteInLessons ? GREEN : 0x4228);
+  canvas->drawRoundRect(60, 242, 120, 60, 12, WHITE);
+  textCenterX(120, 262, "AN", muteInLessons ? BLACK : WHITE, 3);
+  canvas->fillRoundRect(230, 242, 120, 60, 12, !muteInLessons ? RED : 0x4228);
+  canvas->drawRoundRect(230, 242, 120, 60, 12, WHITE);
+  textCenterX(290, 262, "AUS", !muteInLessons ? BLACK : WHITE, 3);
+
+  centerText(340, "Stumm = keine Vibration", 0x8410, 2);
+  centerText(370, "waehrend des Unterrichts", 0x8410, 2);
+
   drawBackButton();
   drawHomeButton();
 }
@@ -2108,7 +2244,7 @@ static void drawRecorder() {
   drawBackButton();
 }
 
-static const char *WF_NAMES[5] = {"Minimal", "Farbig", "Analog", "Digital", "Geometrisch"};
+static const char *WF_NAMES[6] = {"Minimal", "Farbig", "Analog", "Digital", "Geometrisch", "Schule"};
 
 static void wfIcon(int i, int cx, int cy) {
   switch (i) {
@@ -2124,22 +2260,29 @@ static void wfIcon(int i, int cx, int cy) {
       canvas->drawLine(cx, cy, cx + 7, cy + 6, WHITE);
       break;
     case 3: textCenterX(cx, cy - 8, "88", WHITE, 1); break;
-    default: canvas->fillRect(cx - 12, cy - 12, 24, 24, MAGENTA); break;
+    case 4: canvas->fillRect(cx - 12, cy - 12, 24, 24, MAGENTA); break;
+    default:
+      // Schule: Uhr + Stundenlinien
+      canvas->drawCircle(cx, cy, 14, WHITE);
+      canvas->drawLine(cx - 10, cy - 10, cx + 10, cy - 10, WHITE);
+      canvas->drawLine(cx - 10, cy, cx + 10, cy, WHITE);
+      canvas->drawLine(cx - 10, cy + 10, cx + 10, cy + 10, WHITE);
+      break;
   }
 }
 
 static void drawWfPicker() {
   centerText(62, "ZIFERBLATT", YELLOW, 3);
-  for (int i = 0; i < 5; i++) {
-    int y = 108 + i * 66;
+  for (int i = 0; i < 6; i++) {
+    int y = 100 + i * 56;
     bool sel = (i == watchfaceSel);
-    canvas->fillRoundRect(40, y, 330, 54, 12, sel ? 0x4228 : 0x18E3);
-    canvas->drawRoundRect(40, y, 330, 54, 12, sel ? YELLOW : 0x8410);
+    canvas->fillRoundRect(40, y, 330, 50, 12, sel ? 0x4228 : 0x18E3);
+    canvas->drawRoundRect(40, y, 330, 50, 12, sel ? YELLOW : 0x8410);
     canvas->setTextSize(2);
     canvas->setTextColor(sel ? YELLOW : WHITE);
-    canvas->setCursor(62, y + 17);
+    canvas->setCursor(62, y + 15);
     canvas->print(WF_NAMES[i]);
-    wfIcon(i, 320, y + 27);
+    wfIcon(i, 320, y + 25);
   }
   drawBackButton();
 }
@@ -2324,6 +2467,18 @@ static void renderAndFlush() {
   } else { // screen == 4
     drawAppTray();
   }
+
+  // Akku-Warnung überlagern (rote Leiste oben)
+  if (cachedPct >= 0 && cachedPct < 20) {
+    char bbuf[24];
+    snprintf(bbuf, sizeof(bbuf), "AKKU %d%%", cachedPct);
+    canvas->fillRect(0, 0, 410, 26, RED);
+    canvas->setTextSize(2);
+    canvas->setTextColor(WHITE);
+    canvas->setCursor(8, 3);
+    canvas->print(bbuf);
+  }
+
   canvas->flush();
 }
 
@@ -2535,8 +2690,8 @@ static void updateZeitApp() {
 
 static void wfPickerTap(uint16_t x, uint16_t y) {
   if (inBackButton(x, y)) { screen = 0; return; }
-  for (int i = 0; i < 5; i++) {
-    if (inRect(x, y, 40, 108 + i * 66, 330, 54)) {
+  for (int i = 0; i < 6; i++) {
+    if (inRect(x, y, 40, 100 + i * 56, 330, 50)) {
       watchface = i;
       prefs.putInt("wf", i);
       screen = 0;
@@ -2846,8 +3001,10 @@ static void settingsTap(uint16_t x, uint16_t y) {
     else if (inRect(x, y, 230, 300, 120, 70)) setSensorOn(false);
   } else if (settingsItem == 5) {
     if (inBackButton(x, y)) settingsItem = 0;
-    else if (inRect(x, y, 60, 300, 120, 70)) setMotorOn(true);
-    else if (inRect(x, y, 230, 300, 120, 70)) setMotorOn(false);
+    else if (inRect(x, y, 60, 122, 120, 60)) setMotorOn(true);
+    else if (inRect(x, y, 230, 122, 120, 60)) setMotorOn(false);
+    else if (inRect(x, y, 60, 242, 120, 60)) setMuteInLessons(true);
+    else if (inRect(x, y, 230, 242, 120, 60)) setMuteInLessons(false);
   }
 }
 

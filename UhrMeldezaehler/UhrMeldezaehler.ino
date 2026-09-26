@@ -56,9 +56,10 @@ void setup() {
   prefs.begin("melde", false);
   brightness = prefs.getInt("bright", 208);
   watchface = prefs.getInt("wf", 0);
-  if (watchface < 0 || watchface > 4) watchface = 0;
+  if (watchface < 0 || watchface > 5) watchface = 0;
   sensorOn = prefs.getInt("sensorOn", 1) == 1;
   motorOn = prefs.getInt("motorOn", 1) == 1;
+  muteInLessons = prefs.getInt("muteLessons", 0) == 1;
   gfx->setBrightness(brightness);
 
   // Stundenplan + Stunden-Statistik aus NVS laden
