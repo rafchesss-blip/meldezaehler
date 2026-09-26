@@ -77,7 +77,10 @@ class TimetableStore {
       final sorted = sortedPeriods(d);
       for (int i = 0; i < sorted.length; i++) {
         final p = sorted[i];
-        cmds.add('P|$d|$i|${p.name}|${p.sh}|${p.sm}|${p.eh}|${p.em}');
+        // '|' und Zeilenumbrueche wuerden das BLE-Protokoll der Uhr zerlegen.
+        final safeName =
+            p.name.replaceAll('|', ' ').replaceAll('\n', ' ').trim();
+        cmds.add('P|$d|$i|$safeName|${p.sh}|${p.sm}|${p.eh}|${p.em}');
       }
     }
     cmds.add('SAVE');
