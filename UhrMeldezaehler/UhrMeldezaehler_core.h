@@ -273,6 +273,7 @@ static void vibrate(unsigned long ms = 120) {
     pinMode(18, OUTPUT);   // ohne OUTPUT-Modus wuerde digitalWrite nur den Pull-up schalten
     vibPinInit = true;
   }
+  USBSerial.printf("[vib] GPIO18 HIGH fuer %lums\n", ms);
   digitalWrite(18, HIGH);
   delay(ms);
   digitalWrite(18, LOW);
