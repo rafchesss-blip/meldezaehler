@@ -131,10 +131,12 @@ SAVE
 ```bash
 python3 trainieren.py            # Meldebewegung (RandomForest + LogReg)
 python3 trainieren_positionen.py # 3-Zonen-Klassifikator → modell_positionen.joblib
+python3 verify_model.py          # prüft: eingebettetes C-Modell == trainiertes Modell
 ```
 
 Die Koeffizienten des finalen Modells sind als C-Arrays in
 `UhrMeldezaehler_core.h` eingebettet (`SCALER_*`, `COEF_*`, `INTERCEPT_*`).
+Nach einem Neutraining mit `verify_model.py` prüfen, ob die C-Arrays aktuell sind.
 
 ## Werks-Firmware wiederherstellen
 
