@@ -55,14 +55,25 @@ class _HomePageState extends State<HomePage> {
   String _status = "Bereit";
   Map<String, dynamic>? _stats;
 
+  StreamSubscription<BluetoothConnectionState>? _connSub;
+  Timer? _statsTimer;
+
   final TimetableStore _ttStore = TimetableStore();
 
+  @override
   @override
   void initState() {
     super.initState();
     _ttStore.load().then((_) {
       if (mounted) setState(() {});
     });
+  }
+
+  @override
+  void dispose() {
+    _stopStatsRefresh();
+    _connSub?.cancel();
+    super.dispose();
   }
 
   Future<void> _ensurePermissions() async {
@@ -124,6 +135,15 @@ class _HomePageState extends State<HomePage> {
         license: License.nonprofit,
         timeout: const Duration(seconds: 20),
       );
+
+      // Größere MTU anfragen, damit die Statistik-JSON zuverlässig und
+      // ohne viele Blob-Lesevorgänge übertragen wird (nur auf Android).
+      try {
+        await found.requestMtu(512);
+      } catch (_) {}
+
+      _watchConnection(found);
+
       final services = await found.discoverServices();
 
       _timeChar = null;
@@ -154,6 +174,7 @@ class _HomePageState extends State<HomePage> {
 
       await _syncTime();
       await _readStats();
+      _startStatsRefresh();
     } catch (e) {
       setState(() => _status = "Fehler: $e");
     } finally {
@@ -161,9 +182,44 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
+  void _watchConnection(BluetoothDevice device) {
+    _connSub?.cancel();
+    _connSub = device.connectionState.listen((state) {
+      if (state == BluetoothConnectionState.disconnected) {
+        _stopStatsRefresh();
+        if (mounted) {
+          setState(() {
+            _connected = false;
+            _stats = null;
+            _status = "Verbindung getrennt.";
+          });
+        }
+      }
+    });
+  }
+
+  void _startStatsRefresh() {
+    _stopStatsRefresh();
+    _statsTimer = Timer.periodic(const Duration(seconds: 5), (_) async {
+      if (_connected) {
+        try {
+          await _readStats();
+        } catch (_) {
+          // Lesefehler ignorieren – der connectionState-Stream meldet
+          // eine Trennung und aktualisiert die Oberfläche.
+        }
+      }
+    });
+  }
+
+  void _stopStatsRefresh() {
+    _statsTimer?.cancel();
+    _statsTimer = null;
+  }
+
   Future<void> _syncTime() async {
     if (_timeChar == null) {
-      _status = "Zeit-Charakteristik nicht gefunden.";
+      if (mounted) setState(() => _status = "Zeit-Charakteristik nicht gefunden.");
       return;
     }
     final now = DateTime.now();
@@ -181,7 +237,7 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _readStats() async {
     if (_statsChar == null) {
-      _status = "Statistik-Charakteristik nicht gefunden.";
+      if (mounted) setState(() => _status = "Statistik-Charakteristik nicht gefunden.");
       return;
     }
     final value = await _statsChar!.read();
@@ -219,7 +275,7 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _clearStats() async {
     if (_clearChar == null) {
-      _status = "Lösch-Charakteristik nicht gefunden.";
+      if (mounted) setState(() => _status = "Lösch-Charakteristik nicht gefunden.");
       return;
     }
     await _clearChar!.write(utf8.encode("1"), withoutResponse: false);
@@ -229,6 +285,9 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _disconnect() async {
+    _stopStatsRefresh();
+    _connSub?.cancel();
+    _connSub = null;
     if (_device != null) {
       try {
         await _device!.disconnect();
@@ -297,6 +356,9 @@ class _HomePageState extends State<HomePage> {
                     _statRow("Meldungen heute", _stats?['total']),
                     _statRow("In Session", _stats?['session']),
                     _statRow("Seit Kalibrierung", _stats?['seitCalib']),
+                    _statRow("Drangenommen", _stats?['drange']),
+                    _statRow("Richtig / Falsch", _richtigFalschText(_stats)),
+                    _statRow("Meldzeit", _meldezeitText(_stats?['meldezeit'])),
                     _statRow("Akku", _battText(_stats?['batt'])),
                     const SizedBox(height: 16),
                     Text("Verlauf pro Minute",
@@ -367,6 +429,21 @@ class _HomePageState extends State<HomePage> {
   String _battText(dynamic b) {
     if (b == null || b == -1) return "unbekannt";
     return "$b %";
+  }
+
+  String _richtigFalschText(Map<String, dynamic>? stats) {
+    final r = stats?['richtig'];
+    final f = stats?['falsch'];
+    if (r == null && f == null) return "–";
+    return "${r ?? 0} / ${f ?? 0}";
+  }
+
+  String _meldezeitText(dynamic sec) {
+    if (sec == null) return "–";
+    final s = (sec as num).toInt();
+    final m = (s ~/ 60).toString().padLeft(2, '0');
+    final r = (s % 60).toString().padLeft(2, '0');
+    return "$m:$r";
   }
 
   Widget _barChart(dynamic min) {
