@@ -1,17 +1,36 @@
-# melde_app
+# MeldeApp
 
-A new Flutter project.
+Flutter-Begleit-App für den **Meldezähler** (Waveshare ESP32-S3-Touch-AMOLED-2.06).
 
-## Getting Started
+## Funktionen
 
-This project is a starting point for a Flutter application.
+- Uhr per Bluetooth (BLE) finden und verbinden
+- Zeit & Datum synchronisieren
+- Live-Statistik anzeigen (alle 5 s automatisch aktualisiert):
+  - Meldungen heute, Session, seit Kalibrierung
+  - Drangenommen, Richtig/Falsch, Meldzeit
+  - Akku-Stand
+  - Verlauf pro Minute (Balkendiagramm)
+  - Stunden-Statistik (Meldungen pro Unterrichtsstunde)
+- Aktuell laufende Unterrichtsstunde anzeigen
+- Stundenplan verwalten (7 Tage) und an die Uhr übertragen
+- Statistik auf der Uhr löschen
 
-A few resources to get you started if this is your first Flutter project:
+## Build
 
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
+```bash
+flutter pub get
+flutter build apk --release                # Universal-APK
+flutter build apk --release --split-per-abi # eine APK pro ABI
+```
 
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+## Tests
+
+```bash
+flutter test
+dart analyze
+```
+
+## BLE-Protokoll
+
+Siehe [../README.md](../README.md) im Projektstamm.

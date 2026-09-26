@@ -353,6 +353,7 @@ class _HomePageState extends State<HomePage> {
                   children: [
                     Text("Statistik", style: Theme.of(context).textTheme.titleLarge),
                     const SizedBox(height: 8),
+                    _aktuelleStunde(),
                     _statRow("Meldungen heute", _stats?['total']),
                     _statRow("In Session", _stats?['session']),
                     _statRow("Seit Kalibrierung", _stats?['seitCalib']),
@@ -407,6 +408,33 @@ class _HomePageState extends State<HomePage> {
               ),
             ),
           ],
+        ],
+      ),
+    );
+  }
+
+  Widget _aktuelleStunde() {
+    final p = _ttStore.currentPeriod(DateTime.now());
+    if (p == null) return const SizedBox.shrink();
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.only(bottom: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.teal.shade50,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.teal.shade200),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.school, color: Colors.teal, size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              "Aktuelle Stunde: ${p.name} (bis ${p.endLabel})",
+              style: const TextStyle(fontWeight: FontWeight.w600),
+            ),
+          ),
         ],
       ),
     );

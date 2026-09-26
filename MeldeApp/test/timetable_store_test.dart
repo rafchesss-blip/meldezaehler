@@ -76,4 +76,32 @@ void main() {
       expect(cmds, contains('P|2|0|Englisch|9|50|10|35'));
     });
   });
+
+  group('TimetableStore.weekdayOf / currentPeriod', () {
+    test('weekdayOf bildet auf 0=So..6=Sa ab', () {
+      expect(TimetableStore.weekdayOf(DateTime(2026, 9, 21)), 1); // Montag
+      expect(TimetableStore.weekdayOf(DateTime(2026, 9, 27)), 0); // Sonntag
+      expect(TimetableStore.weekdayOf(DateTime(2026, 9, 26)), 6); // Samstag
+    });
+
+    test('currentPeriod findet die laufende Stunde', () {
+      final store = TimetableStore();
+      store.periodsFor(1).add(
+            Period(name: 'Mathe', sh: 8, sm: 0, eh: 9, em: 0),
+          );
+      // Montag 08:30 liegt in Mathe
+      final p = store.currentPeriod(DateTime(2026, 9, 21, 8, 30));
+      expect(p, isNotNull);
+      expect(p!.name, 'Mathe');
+    });
+
+    test('currentPeriod liefert null außerhalb der Stunden', () {
+      final store = TimetableStore();
+      store.periodsFor(1).add(
+            Period(name: 'Mathe', sh: 8, sm: 0, eh: 9, em: 0),
+          );
+      expect(store.currentPeriod(DateTime(2026, 9, 21, 7, 59)), isNull);
+      expect(store.currentPeriod(DateTime(2026, 9, 21, 9, 0)), isNull);
+    });
+  });
 }

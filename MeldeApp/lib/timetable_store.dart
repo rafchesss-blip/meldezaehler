@@ -70,6 +70,21 @@ class TimetableStore {
     return list;
   }
 
+  // Wandelt DateTime.weekday (1=Mo..7=So) in die Tages-Konvention
+  // der Uhr um (0=So, 1=Mo, ..., 6=Sa).
+  static int weekdayOf(DateTime now) => now.weekday % 7;
+
+  // Die Stunde, die zum Zeitpunkt [now] gerade läuft (oder null).
+  Period? currentPeriod(DateTime now) {
+    final cur = now.hour * 60 + now.minute;
+    for (final p in sortedPeriods(weekdayOf(now))) {
+      final s = p.sh * 60 + p.sm;
+      final e = p.eh * 60 + p.em;
+      if (cur >= s && cur < e) return p;
+    }
+    return null;
+  }
+
   // Erzeugt die BLE-Befehle zum Übertragen des Stundenplans
   List<String> buildSendCommands() {
     final cmds = <String>['CLEAR'];
