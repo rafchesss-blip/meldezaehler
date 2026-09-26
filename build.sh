@@ -10,7 +10,10 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-FQBN="${FQBN:-esp32:esp32:esp32s3}"
+# Waveshare ESP32-S3-Touch-AMOLED-2.06: 16 MB Flash + 8 MB OPI-PSRAM.
+# Mit der Standard-4-MB-Partition waere die Firmware zu 99% voll und der
+# Rekorder (PSRAM-Puffer) wuerde nicht funktionieren.
+FQBN="${FQBN:-esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi}"
 SKETCH="UhrMeldezaehler"
 
 build_firmware() {

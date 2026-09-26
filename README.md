@@ -40,14 +40,19 @@ Voraussetzungen: `arduino-cli`, ESP32-Core (`esp32:esp32`), Bibliotheken
 `Arduino_GFX_Library` und `XPowersLib`.
 
 ```bash
-arduino-cli compile --fqbn esp32:esp32:esp32s3 UhrMeldezaehler
-arduino-cli upload  --fqbn esp32:esp32:esp32s3 -p /dev/ttyACM0 UhrMeldezaehler
+# Waveshare ESP32-S3-Touch-AMOLED-2.06 (16 MB Flash + 8 MB OPI-PSRAM):
+arduino-cli compile --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi" UhrMeldezaehler
+arduino-cli upload  --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi" -p /dev/ttyACM0 UhrMeldezaehler
+
+# oder bequem per Skript:
+./build.sh firmware
 ```
 
-> **Wichtig:** Für den Rekorder muss **PSRAM aktiviert** sein (Board-Konfiguration
-> mit 8 MB OPI-PSRAM, z. B. passende Waveshare-Boarddefinition oder manuelle
-> PSRAM/Flash-Einstellungen). Ohne PSRAM deaktiviert sich der Rekorder sauber
-> selbst, der Rest läuft trotzdem.
+> **Wichtig:**
+> - Mit der Standard-4-MB-Partition wäre die Firmware zu **99 % voll** und
+>   der Rekorder hätte keinen PSRAM-Puffer. Deshalb immer `FlashSize=16M`,
+>   `PartitionScheme=huge_app` (3 MB APP) und `PSRAM=opi` verwenden.
+> - Ohne PSRAM deaktiviert sich der Rekorder sauber selbst, der Rest läuft trotzdem.
 
 ### Serielle Befehle (USB, 115200 Baud)
 
