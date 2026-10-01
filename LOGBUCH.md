@@ -328,3 +328,25 @@ Touch-Pollen im Standby entfernt. Aufwachen jetzt **nur noch per Power-Taste**
   heißt `RGB565_*`).
 - **Build:** TensorFlowLite_ESP32 installiert, `patch_tflite_lib.sh` auf
   `python` umgestellt (Windows), kompiliert + geflasht ✅.
+
+## 01.10.2026 – LVGL-App-Menü korrigiert (Watchfaces zurück, Sensor-App fehlte, Übergänge)
+
+Die LVGL-Migration aus „Schritt 1" hatte das Watchface mit nur einem festen
+Layout ersetzt und damit alle 6 Zifferblätter unerreichbar gemacht. Korrigiert:
+
+- **Watchface wieder Canvas:** Screen 0 nutzt wieder `drawWatchface()` mit allen
+  6 Zifferblättern (Minimal/Farbig/Analog/Digital/Geometrisch/Schule). Die
+  Zifferblatt-Auswahl (Screen 3, langes Drücken auf das Watchface) funktioniert
+  damit wieder wie vorher.
+- **LVGL nur noch für das Apps-Menü (Screen 4).** Dort liegen die großen Buttons,
+  dort bringt Partial-Redraw den größten Vorteil.
+- **Sensor-Aufnahme-App wieder im Tray:** Das LVGL-Menü hatte nur 4 statt 5 Apps
+  – `Sensor-Aufnahme` (Screen 9) fehlte und wurde ergänzt (gleiche Anordnung wie
+  der Canvas-Tray).
+- **ZURUECK-Button + Wisch-nach-unten** im LVGL-Menü führen zuverlässig zum
+  Watchface zurück.
+- **Übergang LVGL→Canvas sofort:** Beim Antippen einer App wird `redrawNow`
+  gesetzt, damit die Canvas-App sofort gezeichnet wird statt bis zu 1 s das alte
+  Bild stehen zu lassen (das war der „beim Rausgehen wird nur die alte App
+  angezeigt"-Fehler).
+- Kompiliert ✅ (Flash 59 %, RAM 60 %).

@@ -2,33 +2,33 @@
 /*
  * lvgl_ui.h
  * ----------------------------------------------------------------------------
- * LVGL-Oberfläche (Schritt 1: Watchface + Apps-Menü)
+ * LVGL-Oberfläche (Schritt 2: nur das Apps-Menü läuft über LVGL)
  *
- * LVGL zeichnet nur geänderte Bereiche (Partial-Redraw) statt den kompletten
- * 410x502-Framebuffer. Dadurch blockiert die UI den Prozessor nicht mehr und
- * Touch/Tasten reagieren sofort.
+ * Das Watchface (Screen 0) bleibt vorerst auf der Canvas-Darstellung, damit
+ * alle 6 Zifferblätter (Minimal/Farbig/Analog/Digital/Geometrisch/Schule) und
+ * die Zifferblatt-Auswahl (Screen 3, langes Drücken auf das Watchface)
+ * unverändert funktionieren.
  *
- * Screens 0 (Watchface) und 4 (Apps) laufen über LVGL. Alle übrigen Screens
- * nutzen vorerst weiterhin die alte Canvas-Darstellung, bis sie migriert sind.
+ * Nur der App-Launcher (Screen 4) läuft über LVGL, weil dort die großen
+ * Buttons liegen und Partial-Redraw das Antippen deutlich flüssiger macht.
+ *
+ * Bedienung:
+ *   - App antippen            -> App öffnet (Canvas)
+ *   - ZURUECK / nach unten    -> zurück zum Watchface
  */
 #include <lvgl.h>
 
 static lv_display_t *lvDisp = nullptr;
 static lv_indev_t   *lvTouchIndev = nullptr;
-static lv_obj_t *scrWatchface = nullptr;
 static lv_obj_t *scrApps = nullptr;
-
-static lv_obj_t *lblTime = nullptr;
-static lv_obj_t *lblDate = nullptr;
-static lv_obj_t *lblBatt = nullptr;
-static lv_obj_t *lblHeute = nullptr;
 
 static lv_obj_t *btnMelde = nullptr;
 static lv_obj_t *btnSettings = nullptr;
 static lv_obj_t *btnZeit = nullptr;
+static lv_obj_t *btnSensor = nullptr;
 static lv_obj_t *btnTest = nullptr;
 
-// true = LVGL rendert gerade (Screens 0/4), false = alte Canvas-UI
+// true = LVGL rendert gerade (Screen 4), false = Canvas-UI
 bool lvglActive = false;
 
 #define LVGL_BUF_PIXELS (LCD_WIDTH * 50)   // Teilpuffer: 410 x 50
@@ -60,31 +60,29 @@ static uint32_t lvglTickCb(void) {
 }
 
 // ---------------------------------------------------------------------------
-// Watchface: nach oben wischen -> Apps
+// Navigation
 // ---------------------------------------------------------------------------
-static void lvglWatchfaceGesture(lv_event_t *e) {
-  lv_indev_t *indev = lv_indev_active();
-  if (!indev) return;
-  lv_dir_t dir = lv_indev_get_gesture_dir(indev);
-  if (dir == LV_DIR_TOP) {
-    screen = 4;
-    lv_screen_load(scrApps);
-  }
+static void lvglBackToWatchface() {
+  screen = 0;
+  lvglActive = false;
+  redrawNow = true;   // Watchface (Canvas) sofort neu zeichnen
 }
 
+// Nach unten wischen -> Watchface
 static void lvglAppsGesture(lv_event_t *e) {
   lv_indev_t *indev = lv_indev_active();
   if (!indev) return;
   lv_dir_t dir = lv_indev_get_gesture_dir(indev);
   if (dir == LV_DIR_BOTTOM) {
-    screen = 0;
-    lv_screen_load(scrWatchface);
+    lvglBackToWatchface();
   }
 }
 
-// ---------------------------------------------------------------------------
-// App-Buttons: Tippen wechselt zurück zur Canvas-UI (Screen noch nicht migriert)
-// ---------------------------------------------------------------------------
+static void lvglBackBtnEvent(lv_event_t *e) {
+  lvglBackToWatchface();
+}
+
+// App-Buttons: Tippen wechselt zurück zur Canvas-UI
 static void lvglAppBtnEvent(lv_event_t *e) {
   lv_obj_t *btn = (lv_obj_t *)lv_event_get_target(e);
   if (btn == btnMelde) {
@@ -96,65 +94,35 @@ static void lvglAppBtnEvent(lv_event_t *e) {
   } else if (btn == btnZeit) {
     screen = 7;
     zeitTab = 0;
+  } else if (btn == btnSensor) {
+    screen = 9;
   } else if (btn == btnTest) {
     screen = 8;
   }
   lvglActive = false;
+  redrawNow = true;   // Canvas-App sofort zeichnen (kein 1-s-Versatz)
 }
 
 // ---------------------------------------------------------------------------
-// Screens aufbauen
+// Apps-Menü aufbauen (5 Apps, wie im Canvas-App-Tray)
 // ---------------------------------------------------------------------------
 static lv_obj_t *lvglMakeBtn(lv_obj_t *parent, int x, int y, int w, int h,
-                             const char *text, lv_color_t bg) {
+                             const char *text, lv_color_t bg, lv_color_t border) {
   lv_obj_t *btn = lv_button_create(parent);
   lv_obj_set_pos(btn, x, y);
   lv_obj_set_size(btn, w, h);
   lv_obj_set_style_bg_color(btn, bg, 0);
   lv_obj_set_style_bg_opa(btn, LV_OPA_COVER, 0);
-  lv_obj_set_style_radius(btn, 18, 0);
+  lv_obj_set_style_radius(btn, 14, 0);
+  lv_obj_set_style_border_width(btn, 2, 0);
+  lv_obj_set_style_border_color(btn, border, 0);
+
   lv_obj_t *lbl = lv_label_create(btn);
   lv_label_set_text(lbl, text);
   lv_obj_set_style_text_color(lbl, lv_color_black(), 0);
+  lv_obj_set_style_text_font(lbl, &lv_font_montserrat_20, 0);
   lv_obj_center(lbl);
   return btn;
-}
-
-static void lvglBuildWatchface() {
-  scrWatchface = lv_obj_create(NULL);
-  lv_obj_set_style_bg_color(scrWatchface, lv_color_black(), 0);
-  lv_obj_set_style_bg_opa(scrWatchface, LV_OPA_COVER, 0);
-
-  // Uhrzeit (groß)
-  lblTime = lv_label_create(scrWatchface);
-  lv_label_set_text(lblTime, "--:--");
-  lv_obj_set_style_text_font(lblTime, &lv_font_montserrat_48, 0);
-  lv_obj_set_style_text_color(lblTime, lv_color_white(), 0);
-  lv_obj_align(lblTime, LV_ALIGN_TOP_MID, 0, 45);
-
-  // Datum
-  lblDate = lv_label_create(scrWatchface);
-  lv_label_set_text(lblDate, "--");
-  lv_obj_set_style_text_font(lblDate, &lv_font_montserrat_20, 0);
-  lv_obj_set_style_text_color(lblDate, lv_color_white(), 0);
-  lv_obj_align(lblDate, LV_ALIGN_TOP_MID, 0, 125);
-
-  // Akku
-  lblBatt = lv_label_create(scrWatchface);
-  lv_label_set_text(lblBatt, "--%");
-  lv_obj_set_style_text_font(lblBatt, &lv_font_montserrat_20, 0);
-  lv_obj_set_style_text_color(lblBatt, lv_color_white(), 0);
-  lv_obj_align(lblBatt, LV_ALIGN_TOP_MID, 0, 165);
-
-  // Meldungen heute
-  lblHeute = lv_label_create(scrWatchface);
-  lv_label_set_text(lblHeute, "0 Meldungen");
-  lv_obj_set_style_text_font(lblHeute, &lv_font_montserrat_24, 0);
-  lv_obj_set_style_text_color(lblHeute, lv_color_white(), 0);
-  lv_obj_align(lblHeute, LV_ALIGN_BOTTOM_MID, 0, -60);
-
-  // Nach oben wischen -> Apps
-  lv_obj_add_event_cb(scrWatchface, lvglWatchfaceGesture, LV_EVENT_GESTURE, NULL);
 }
 
 static void lvglBuildApps() {
@@ -168,27 +136,53 @@ static void lvglBuildApps() {
   lv_obj_set_style_text_color(title, lv_color_white(), 0);
   lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 15);
 
-  lv_color_t cMelde = LV_COLOR_MAKE(0x18, 0xC3, 0x00);
-  lv_color_t cSet   = LV_COLOR_MAKE(0xE5, 0xA0, 0x00);
-  lv_color_t cZeit  = LV_COLOR_MAKE(0xD6, 0x9A, 0x00);
-  lv_color_t cTest  = LV_COLOR_MAKE(0xBD, 0xF7, 0x00);
+  // Gleiche Anordnung wie der Canvas-App-Tray (inkl. Sensor-Aufnahme).
+  lv_color_t cMelde  = LV_COLOR_MAKE(0x18, 0xC3, 0x00);
+  lv_color_t cSet    = LV_COLOR_MAKE(0xE5, 0xA0, 0x00);
+  lv_color_t cZeit   = LV_COLOR_MAKE(0xD6, 0x9A, 0x00);
+  lv_color_t cSensor = LV_COLOR_MAKE(0xFC, 0x18, 0x00);
+  lv_color_t cTest   = LV_COLOR_MAKE(0xBD, 0xF7, 0x00);
 
-  btnMelde = lvglMakeBtn(scrApps, 20, 80, 180, 190, "MELDE-\nZAEHLER", cMelde);
-  btnSettings = lvglMakeBtn(scrApps, 210, 80, 180, 190, "EINSTEL-\nLUNGEN", cSet);
-  btnZeit = lvglMakeBtn(scrApps, 20, 285, 180, 190, "ZEIT", cZeit);
-  btnTest = lvglMakeBtn(scrApps, 210, 285, 180, 190, "TEST", cTest);
+  lv_color_t cyan    = lv_color_make(0x00, 0xFF, 0xFF);
+  lv_color_t yellow  = lv_color_make(0xFF, 0xFF, 0x00);
+  lv_color_t magenta = lv_color_make(0xFF, 0x00, 0xFF);
+  lv_color_t green   = lv_color_make(0x00, 0xFF, 0x00);
+  lv_color_t white   = lv_color_white();
+
+  btnMelde    = lvglMakeBtn(scrApps, 20, 80, 180, 120, "MELDE-\nZAEHLER", cMelde, cyan);
+  btnSettings = lvglMakeBtn(scrApps, 210, 80, 180, 120, "EINSTEL-\nLUNGEN", cSet, yellow);
+  btnZeit     = lvglMakeBtn(scrApps, 20, 210, 180, 120, "ZEIT\nTimer +\nStoppuhr", cZeit, magenta);
+  btnSensor   = lvglMakeBtn(scrApps, 210, 210, 180, 120, "SENSOR-\nAUFNAHME", cSensor, green);
+  btnTest     = lvglMakeBtn(scrApps, 20, 340, 370, 80, "TEST", cTest, white);
 
   lv_obj_add_event_cb(btnMelde, lvglAppBtnEvent, LV_EVENT_CLICKED, NULL);
   lv_obj_add_event_cb(btnSettings, lvglAppBtnEvent, LV_EVENT_CLICKED, NULL);
   lv_obj_add_event_cb(btnZeit, lvglAppBtnEvent, LV_EVENT_CLICKED, NULL);
+  lv_obj_add_event_cb(btnSensor, lvglAppBtnEvent, LV_EVENT_CLICKED, NULL);
   lv_obj_add_event_cb(btnTest, lvglAppBtnEvent, LV_EVENT_CLICKED, NULL);
+
+  // ZURUECK-Button unten links (wie in der Canvas-UI)
+  lv_obj_t *btnBack = lv_button_create(scrApps);
+  lv_obj_set_pos(btnBack, 40, 445);
+  lv_obj_set_size(btnBack, 130, 40);
+  lv_obj_set_style_bg_color(btnBack, lv_color_make(0x28, 0x28, 0x38), 0);
+  lv_obj_set_style_bg_opa(btnBack, LV_OPA_COVER, 0);
+  lv_obj_set_style_radius(btnBack, 8, 0);
+  lv_obj_set_style_border_width(btnBack, 2, 0);
+  lv_obj_set_style_border_color(btnBack, lv_color_white(), 0);
+  lv_obj_t *lblBack = lv_label_create(btnBack);
+  lv_label_set_text(lblBack, "ZURUECK");
+  lv_obj_set_style_text_color(lblBack, lv_color_white(), 0);
+  lv_obj_set_style_text_font(lblBack, &lv_font_montserrat_20, 0);
+  lv_obj_center(lblBack);
+  lv_obj_add_event_cb(btnBack, lvglBackBtnEvent, LV_EVENT_CLICKED, NULL);
 
   // Nach unten wischen -> Watchface
   lv_obj_add_event_cb(scrApps, lvglAppsGesture, LV_EVENT_GESTURE, NULL);
 }
 
 // ---------------------------------------------------------------------------
-// Init + Enter + Update
+// Init + Enter
 // ---------------------------------------------------------------------------
 static void lvglUiInit() {
   lv_init();
@@ -207,43 +201,12 @@ static void lvglUiInit() {
   lv_indev_set_type(lvTouchIndev, LV_INDEV_TYPE_POINTER);
   lv_indev_set_read_cb(lvTouchIndev, lvglTouchCb);
 
-  lvglBuildWatchface();
   lvglBuildApps();
 
-  USBSerial.println("[lvgl] init OK");
+  USBSerial.println("[lvgl] Apps-Menue init OK");
 }
 
-// LVGL-Screen für den aktuellen screen-Wert laden
 static void lvglUiEnter(int scr) {
-  if (scr == 0) lv_screen_load(scrWatchface);
-  else lv_screen_load(scrApps);
+  lv_screen_load(scrApps);
   lvglActive = true;
-}
-
-// Labels 1x/s aktualisieren
-static void lvglUiUpdateLabels() {
-  char buf[40];
-
-  if (lblTime) {
-    if (cachedH >= 0) snprintf(buf, sizeof(buf), "%02d:%02d", cachedH, cachedM);
-    else snprintf(buf, sizeof(buf), "--:--");
-    lv_label_set_text(lblTime, buf);
-  }
-  if (lblDate) {
-    if (cachedDay >= 1 && cachedMon >= 1) {
-      int wd = weekdayOf(cachedDay, cachedMon, 2000 + cachedYr);
-      snprintf(buf, sizeof(buf), "%s %02d.%02d.%02d", WD_DE[wd], cachedDay, cachedMon, cachedYr);
-    } else {
-      snprintf(buf, sizeof(buf), "-- --.--.--");
-    }
-    lv_label_set_text(lblDate, buf);
-  }
-  if (lblBatt) {
-    snprintf(buf, sizeof(buf), "%d%%", cachedPct >= 0 ? cachedPct : 0);
-    lv_label_set_text(lblBatt, buf);
-  }
-  if (lblHeute) {
-    snprintf(buf, sizeof(buf), "%d Meldungen", totalHeute);
-    lv_label_set_text(lblHeute, buf);
-  }
 }

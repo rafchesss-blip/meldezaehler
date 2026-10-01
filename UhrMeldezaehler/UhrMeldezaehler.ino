@@ -68,9 +68,8 @@ void setup() {
   // Tasten
   pinMode(BOOT_BTN_PIN, INPUT_PULLUP);
 
-  // LVGL-Oberfläche (Watchface + Apps) initialisieren
+  // LVGL-Oberfläche initialisieren (Apps-Menü; Watchface bleibt Canvas)
   lvglUiInit();
-  lvglUiEnter(0);
 
   // NVS laden
   prefs.begin("melde", false);
@@ -219,8 +218,8 @@ void loop() {
     minuteStartMs += minuteElapsed * 60000UL;
   }
 
-  // 3) LVGL-Modus umschalten (Screens 0/4 = LVGL, Rest = Canvas)
-  bool wantLvgl = (screen == 0 || screen == 4);
+  // 3) LVGL-Modus umschalten (nur Apps-Menü = LVGL, Rest = Canvas)
+  bool wantLvgl = (screen == 4);
   if (wantLvgl && !lvglActive) {
     lvglUiEnter(screen);
   } else if (!wantLvgl) {
@@ -234,7 +233,6 @@ void loop() {
     if (nowMs - lastLvglEnvMs >= 1000) {
       lastLvglEnvMs = nowMs;
       updateEnv();
-      lvglUiUpdateLabels();
     }
     if (!standby && !streamMode) lv_timer_handler();
   } else {
