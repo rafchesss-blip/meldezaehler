@@ -18,7 +18,7 @@ void setup() {
 
   // Akku sparen: WLAN aus, CPU-Takt senken (BLE/Display/Sensor laufen damit problemlos)
   WiFi.mode(WIFI_OFF);
-  setCpuFrequencyMhz(240);   // 240 MHz im Betrieb (flüssige UI + CNN), 160 MHz nur im Standby
+  setCpuFrequencyMhz(160);   // Akku sparen – LVGL rendert nur geänderte Bereiche
 
   Wire.begin(IIC_SDA, IIC_SCL);
 

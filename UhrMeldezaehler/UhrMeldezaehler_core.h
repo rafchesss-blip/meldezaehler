@@ -1221,7 +1221,17 @@ static int predictClassCNN(float prob[2]) {
     }
   }
 
+  unsigned long inv0 = micros();
   if (cnnInterp->Invoke() != kTfLiteOk) return 1;
+
+  {
+    static unsigned long cnnAcc = 0; static int cnnN = 0;
+    cnnAcc += micros() - inv0; cnnN++;
+    if (cnnN >= 20) {
+      USBSerial.printf("[perf] CNN avg=%lu us\n", cnnAcc / cnnN);
+      cnnAcc = 0; cnnN = 0;
+    }
+  }
 
   const float outScale = cnnOutput->params.scale;
   const int outZero = cnnOutput->params.zero_point;
@@ -2973,7 +2983,6 @@ static void enterStandby() {
   standby = true;
   screen = 0;                 // beim Aufwachen auf dem Watchface landen
   touchWasDown = false;
-  setCpuFrequencyMhz(160);    // Display aus -> weniger CPU reicht
   gfx->setBrightness(0);      // nur Display aus – Sensor/Motor zählen weiter
   gfx->displayOff();          // Display-Controller in Sleep (spart mehr als nur Helligkeit 0)
   USBSerial.println("[power] Standby (Display aus, Zaehlung laeuft weiter)");
@@ -2981,7 +2990,6 @@ static void enterStandby() {
 
 static void wakeFromStandby() {
   standby = false;
-  setCpuFrequencyMhz(240);    // volle CPU für flüssiges UI
   gfx->displayOn();
   gfx->setBrightness(brightness);
   USBSerial.println("[power] Aufgewacht");
