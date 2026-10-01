@@ -32,6 +32,7 @@ static volatile bool recStop = false;
 static volatile bool playStop = false;
 static TaskHandle_t recTaskHandle = nullptr;
 static TaskHandle_t playTaskHandle = nullptr;
+static bool audioInited = false;   // Audio wird lazy initialisiert (spart Akku)
 
 static void codecWrite(uint8_t addr, uint8_t reg, uint8_t val) {
   Wire.beginTransmission(addr);
@@ -194,8 +195,16 @@ static bool audioInit() {
   return true;
 }
 
+// Audio erst beim ersten echten Gebrauch einschalten (Mikrofon, DAC, I2S
+// und Verstärker verbrauchen sonst dauerhaft Strom).
+static bool ensureAudio() {
+  if (audioInited) return true;
+  audioInited = audioInit();
+  return audioInited;
+}
+
 static int16_t recPeak() {
-  if (!recBuf || recLen < 4) return 0;
+  if (!ensureAudio() || !recBuf || recLen < 4) return 0;
   int16_t *s = (int16_t *)recBuf;
   uint32_t n = recLen / 2;
   int16_t peak = 0;
@@ -238,7 +247,7 @@ static void playTask(void *arg) {
 }
 
 static void recStart() {
-  if (!recBuf || recording) return;
+  if (!ensureAudio() || !recBuf || recording) return;
   recStop = false;
   recLen = 0;
   recording = true;
@@ -252,7 +261,7 @@ static void recStopRecording() {
 }
 
 static void playStart() {
-  if (!recBuf || recLen == 0 || playing) return;
+  if (!ensureAudio() || !recBuf || recLen == 0 || playing) return;
   playStop = false;
   playing = true;
   xTaskCreate(playTask, "play", 4096, NULL, 1, &playTaskHandle);
@@ -282,6 +291,7 @@ static void toneTask(void *arg) {
 }
 
 static void playTestTone() {
+  if (!ensureAudio()) return;
   static int16_t *tone = nullptr;
   if (!tone) {
     tone = (int16_t *)malloc(REC_SAMPLE_RATE * 4);

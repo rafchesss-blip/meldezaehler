@@ -31,6 +31,7 @@
  *    - Power-Taste   : eine Ebene zurück; auf dem Watchface -> Standby
  *                      (Display aus, Meldungen zählen weiter); im Standby -> aufwachen
  *    - BOOT-Taste    : Melde-Menü (Löschen / Hinzufügen / Bearbeiten)
+ *    - BOOT 2x schnell: TISCH-Position neu lernen (Uhr liegt auf dem Tisch)
  *
  *  Serielle Befehle (USB, 115200 Baud):
  *    RESET           : Tageszähler auf 0
@@ -62,7 +63,23 @@ HWCDC USBSerial;
 Preferences prefs;
 XPowersPMU pmu;
 
-#include "audio_codec.h"
+#include <SD_MMC.h>
+
+// ---------------------------------------------------------------------------
+// CNN-Erkennung (TensorFlow Lite Micro, int8-quantisiert)
+// USE_CNN = 1: CNN (TFLite-Micro) | 0: bisherige LogisticRegression
+// ---------------------------------------------------------------------------
+#define USE_CNN 1
+
+#if USE_CNN
+#include <TensorFlowLite_ESP32.h>
+#include <SD_MMC.h>
+#include "tensorflow/lite/micro/all_ops_resolver.h"
+#include "tensorflow/lite/micro/micro_error_reporter.h"
+#include "tensorflow/lite/micro/micro_interpreter.h"
+#include "tensorflow/lite/schema/schema_generated.h"
+#include "modell_cnn_data.h"
+#endif
 
 // ---------------------------------------------------------------------------
 // Pin-Konfiguration (Waveshare ESP32-S3-Touch-AMOLED-2.06)
@@ -82,6 +99,24 @@ XPowersPMU pmu;
 #define TP_RESET    9
 #define TP_INT      38
 #define BOOT_BTN_PIN 0     // BOOT-Taste (aktiv LOW)
+
+// SD-Karte (microSD, 1-Bit-SDMMC) – für CNN-Modell + Sensor-Aufnahme
+#define SDMMC_CLK   2
+#define SDMMC_CMD   1
+#define SDMMC_DATA  3
+
+// Gemeinsame SD-Mount-Hilfe (einmal mounten, CNN + Recorder teilen sich das).
+static bool sdMounted = false;
+
+static bool ensureSd() {
+  if (sdMounted) return true;
+  SD_MMC.setPins(SDMMC_CLK, SDMMC_CMD, SDMMC_DATA);
+  if (SD_MMC.begin("/sdcard", true)) {   // true = 1-Bit-Modus (nur D0 verdrahtet)
+    sdMounted = true;
+    return true;
+  }
+  return false;
+}
 
 // I2C-Adressen
 #define QMI_ADDR    0x6B
@@ -336,7 +371,7 @@ static void vibrate(unsigned long ms = 120) {
 
 // ---------------------------------------------------------------------------
 // Portiertes Modell: StandardScaler + LogisticRegression (3 Klassen)
-// Klassen-Reihenfolge: 0=kopf, 1=meldung, 2=tisch
+// Klassen-Reihenfolge: 0=meldung, 1=nicht_meldung
 // ---------------------------------------------------------------------------
 static const float SCALER_MEAN[6] = {-0.13216681f, 0.06450418f, 0.58782174f,
                                       1.12247951f, 112.22219355f, 352.60333127f};
@@ -355,6 +390,28 @@ static const float INTERCEPT_TISCH   = -1.17250586f;
 // Referenz-Schwerkraftrichtungen aus dem Training (für die Achsen-Rotation)
 static const float REF_TISCH[3]   = {-0.21516448f, -0.62174984f, 0.75308126f};
 static const float REF_MELDUNG[3] = {-0.19802275f, 0.68946092f, 0.69672852f};
+
+#if USE_CNN
+// Per-Kanal-Standardisierung des CNN (aus modell_cnn_meta.joblib).
+// Kanäle: 0..2 = Beschleunigung (g), 3..5 = Drehrate (dps)
+static const float CNN_MEAN[6] = {-0.517373979f, 0.144679025f, 0.636336744f, 7.82536364f, 0.632597327f, 7.15408325f};
+static const float CNN_STD[6]  = {0.412273735f, 0.468833745f, 0.34916544f, 74.5159683f, 86.1606064f, 78.6526871f};
+
+// Tensor-Arena + Interpreter (int8-CNN, 1,5-s-Fenster x 6 Kanäle)
+static constexpr int CNN_ARENA_SIZE = 32 * 1024;
+static uint8_t cnnArena[CNN_ARENA_SIZE];
+static bool cnnTried = false;
+static bool cnnOk = false;
+static tflite::MicroErrorReporter cnnReporter;
+static tflite::MicroInterpreter *cnnInterp = nullptr;
+static TfLiteTensor *cnnInput = nullptr;
+static TfLiteTensor *cnnOutput = nullptr;
+
+// Optional: CNN-Modell von der SD-Karte (/model.tflite) statt aus dem Flash
+#define CNN_MODEL_MAX_BYTES (32 * 1024)
+alignas(8) static uint8_t cnnModelSdBuf[CNN_MODEL_MAX_BYTES];
+static const unsigned char *cnnModelData = modell_cnn_int8_tflite;  // Standard: Flash
+#endif
 
 // ---------------------------------------------------------------------------
 // 3D-Helfer
@@ -424,6 +481,8 @@ bool calibrated = false;
 #define AUSWERT_N    50    // alle 50 Samples (0,5 s) auswerten
 
 #define CAL_REPS      10    // Wiederholungen pro Kalibrier-Haltung
+#define VIB_REP_MS     100   // kurze Vibration pro Kalibrier-Wiederholung
+#define VIB_SCHRITT_MS 500   // längere Vibration nach jedem Kalibrier-Schritt
 #define LEAVE_HOCH   0.00f
 #define MIN_HALTEN_MS  500
 #define SPERRE_MS      2500
@@ -438,15 +497,28 @@ int   bufHead = 0, bufCount = 0;
 unsigned long nextSampleUs = 0;
 int sampleCounter = 0;
 
+// Daten-Streaming für das PC-Training: STREAM startet, STOPSTREAM beendet.
+bool streamMode = false;
+unsigned long nextStreamUs = 0;
+
+// Sensor-Aufnahme direkt auf die SD-Karte (Training, ganz ohne PC)
+bool sensorRec = false;
+File sensorRecFile;
+String sensorRecLabel;
+uint32_t sensorRecTrial = 0;
+int sensorRecCount = 0;
+unsigned long sensorRecNextUs = 0;
+int recTrialCounter = 1000;   // Startwert, damit Trials nicht mit PC-Daten kollidieren
+
 // Zustand
 bool imHoch = false;
 unsigned long hochSeitMs = 0;
 unsigned long letzteMeldungMs = 0;
-bool hochKopf = false;         // finale Entscheidung: "oben" war überwiegend KOPF
-int  hochKopfCount = 0;        // wie oft KOPF während "oben" gesehen wurde
+bool hochNicht = false;        // finale Entscheidung: "oben" war überwiegend NICHT-MELDEN
+int  hochNichtCount = 0;       // wie oft NICHT-MELDEN während "oben" gesehen wurde
 int  hochMeldungCount = 0;     // wie oft MELDUNG während "oben" gesehen wurde
-int  aktuellKlasse = 2;        // 0=kopf,1=meldung,2=tisch
-float aktuellProb[3] = {0, 0, 1};
+int  aktuellKlasse = 1;        // 0=meldung, 1=nicht_meldung
+float aktuellProb[2] = {0, 1};
 float aktuellScore = -1.0f;
 
 // Statistik
@@ -495,12 +567,16 @@ char testInfo[40] = "";
 unsigned long testInfoMs = 0;
 
 // Standby + Tasten
+#define BOOT_DOUBLE_MS 800   // Zeitfenster (ms) für Doppel-Klick auf BOOT
 bool standby = false;
 bool bootBtnWasDown = false;
 unsigned long bootDownMs = 0;
+// Doppel-Klick-Erkennung (zwei schnelle BOOT-Drücke)
+bool bootDoublePending = false;
+unsigned long bootFirstPressMs = 0;
 
 // App-Struktur (Launcher)
-int screen = 0;                // 0 = Watchface, 1 = Meldezähler, 2 = Einstellungen, 3 = Zifferblatt, 4 = Apps, 5 = Rekorder, 6 = Melde-Bearbeiten, 7 = Zeit, 8 = Test
+int screen = 0;                // 0 = Watchface, 1 = Meldezähler, 2 = Einstellungen, 3 = Zifferblatt, 4 = Apps, 6 = Melde-Bearbeiten, 7 = Zeit, 8 = Test, 9 = Sensor-Aufnahme
 int settingsItem = 0;          // 0 = Menü, 1 = Helligkeit, 2 = WLAN, 3 = Bluetooth
 int meldeEditMode = 0;         // 0 = Menü (Löschen/Hinzufügen/Bearbeiten), 1 = Bearbeiten, 2 = Richtig/Falsch
 bool calibSelectOpen = false;  // Auswahl "Was kalibrieren?" im Kalibrier-Screen
@@ -957,9 +1033,10 @@ static Stats computeStats(int n) {
   return st;
 }
 
-// Softmax über die 3 Klassen, gibt Klassen-Index zurück.
+// Softmax über die alten 3 LogReg-Klassen, gemappt auf 2 Klassen
+// (0 = meldung, 1 = nicht_meldung = kopf + tisch).
 static int predictClass(Vec3 m, float accStd, float gmean, float gmax,
-                        float prob[3]) {
+                        float prob[2]) {
   float f[6] = {m.x, m.y, m.z, accStd, gmean, gmax};
   float x[6];
   for (int i = 0; i < 6; i++) x[i] = (f[i] - SCALER_MEAN[i]) / SCALER_SCALE[i];
@@ -977,12 +1054,143 @@ static int predictClass(Vec3 m, float accStd, float gmean, float gmax,
   float mz = fmaxf(z0, fmaxf(z1, z2));
   float e0 = expf(z0 - mz), e1 = expf(z1 - mz), e2 = expf(z2 - mz);
   float s = e0 + e1 + e2;
-  prob[0] = e0 / s; prob[1] = e1 / s; prob[2] = e2 / s;
+  prob[0] = e1 / s;              // meldung
+  prob[1] = (e0 + e2) / s;       // nicht_meldung (kopf + tisch)
 
-  if (prob[0] >= prob[1] && prob[0] >= prob[2]) return 0;
-  if (prob[1] >= prob[2]) return 1;
-  return 2;
+  return prob[0] >= prob[1] ? 0 : 1;
 }
+
+#if USE_CNN
+// ---------------------------------------------------------------------------
+// CNN (TFLite-Micro): Einmalige Initialisierung (lazy, beim ersten Aufruf)
+// ---------------------------------------------------------------------------
+// Lädt das Modell bevorzugt von der SD-Karte (/model.tflite), sonst aus dem Flash.
+static bool loadCnnModelFromSd() {
+  if (!ensureSd()) {
+    USBSerial.println("[cnn] SD-Karte nicht lesbar - nutze eingebautes Modell");
+    return false;
+  }
+  File f = SD_MMC.open("/model.tflite", FILE_READ);
+  if (!f) {
+    USBSerial.println("[cnn] /model.tflite nicht gefunden - nutze eingebautes Modell");
+    return false;
+  }
+  size_t n = f.size();
+  if (n < 8 || n > CNN_MODEL_MAX_BYTES) {
+    USBSerial.printf("[cnn] /model.tflite ungueltige Groesse (%u Bytes)\n", (unsigned)n);
+    f.close();
+    return false;
+  }
+  size_t r = f.read(cnnModelSdBuf, n);
+  f.close();
+  if (r != n) {
+    USBSerial.println("[cnn] /model.tflite Lesefehler - nutze eingebautes Modell");
+    return false;
+  }
+  if (memcmp(cnnModelSdBuf + 4, "TFL3", 4) != 0) {
+    USBSerial.println("[cnn] /model.tflite ist keine gueltige TFLite-Datei");
+    return false;
+  }
+  cnnModelData = cnnModelSdBuf;
+  USBSerial.printf("[cnn] Modell von SD-Karte geladen (%u Bytes)\n", (unsigned)n);
+  return true;
+}
+
+static void cnnInit() {
+  if (cnnTried) return;
+  cnnTried = true;
+
+  // Modellquelle: SD-Karte bevorzugt, sonst eingebautes Flash-Modell
+  if (!loadCnnModelFromSd()) {
+    cnnModelData = modell_cnn_int8_tflite;
+  }
+
+  const tflite::Model *model = tflite::GetModel(cnnModelData);
+  if (model->version() != TFLITE_SCHEMA_VERSION) {
+    if (cnnModelData != modell_cnn_int8_tflite) {
+      USBSerial.println("[cnn] SD-Modell ungueltig - nutze eingebautes Modell");
+      cnnModelData = modell_cnn_int8_tflite;
+      model = tflite::GetModel(cnnModelData);
+    }
+  }
+  if (model->version() != TFLITE_SCHEMA_VERSION) {
+    USBSerial.printf("[cnn] Schema-Version %d != %d\n",
+                     model->version(), TFLITE_SCHEMA_VERSION);
+    return;
+  }
+
+  // Modell muss genau 2 Ausgänge (Klassen) haben; sonst (z. B. altes
+  // 4-Klassen-Modell auf der SD-Karte) das eingebaute Modell verwenden.
+  if (cnnModelData != modell_cnn_int8_tflite) {
+    int nOut = 0;
+    const auto *sub = model->subgraphs()->Get(0);
+    if (sub && sub->outputs()->size() > 0) {
+      int oi = sub->outputs()->Get(0);
+      const auto *shape = sub->tensors()->Get(oi)->shape();
+      if (shape && shape->size() >= 2) nOut = shape->Get(1);
+    }
+    if (nOut != 2) {
+      USBSerial.printf("[cnn] SD-Modell hat %d Klassen statt 2 - nutze eingebautes Modell\n", nOut);
+      cnnModelData = modell_cnn_int8_tflite;
+      model = tflite::GetModel(cnnModelData);
+    }
+  }
+
+  static tflite::AllOpsResolver resolver;
+  static tflite::MicroInterpreter interp(model, resolver, cnnArena,
+                                         CNN_ARENA_SIZE, &cnnReporter);
+  cnnInterp = &interp;
+  if (cnnInterp->AllocateTensors() != kTfLiteOk) {
+    USBSerial.println("[cnn] AllocateTensors() fehlgeschlagen");
+    return;
+  }
+  cnnInput = cnnInterp->input(0);
+  cnnOutput = cnnInterp->output(0);
+  cnnOk = true;
+  USBSerial.printf("[cnn] bereit (in scale=%.6f zero=%d, out scale=%.6f zero=%d)\n",
+                   (double)cnnInput->params.scale, cnnInput->params.zero_point,
+                   (double)cnnOutput->params.scale, cnnOutput->params.zero_point);
+}
+
+// CNN-Inferenz: 1,5-s-Fenster (150 Samples x 6 Kanäle) aus dem Ringpuffer,
+// rotiert ins Trainings-Koordinatensystem, standardisiert und int8-quantisiert.
+static int predictClassCNN(float prob[2]) {
+  cnnInit();
+  if (!cnnOk) return 1;   // sicherer Fallback: NICHT-MELDEN
+
+  const int start = (bufHead - FENSTER + BUF_N) % BUF_N;
+  const float inScale = cnnInput->params.scale;
+  const int inZero = cnnInput->params.zero_point;
+
+  for (int t = 0; t < FENSTER; t++) {
+    int i = (start + t) % BUF_N;
+    Vec3 a = {axBuf[i], ayBuf[i], azBuf[i]};
+    Vec3 g = {gxBuf[i], gyBuf[i], gzBuf[i]};
+    Vec3 ar, gr;
+    rotVec(R_model, a, ar);
+    rotVec(R_model, g, gr);
+    const float f[6] = {ar.x, ar.y, ar.z, gr.x, gr.y, gr.z};
+    for (int c = 0; c < 6; c++) {
+      float x = (f[c] - CNN_MEAN[c]) / CNN_STD[c];
+      int q = (int)lroundf(x / inScale) + inZero;
+      if (q < -128) q = -128;
+      else if (q > 127) q = 127;
+      cnnInput->data.int8[t * 6 + c] = (int8_t)q;
+    }
+  }
+
+  if (cnnInterp->Invoke() != kTfLiteOk) return 1;
+
+  const float outScale = cnnOutput->params.scale;
+  const int outZero = cnnOutput->params.zero_point;
+  const int nOut = (cnnOutput->dims->size >= 2) ? cnnOutput->dims->data[1] : 1;
+  for (int i = 0; i < 2; i++) prob[i] = 0.0f;
+  for (int i = 0; i < nOut && i < 2; i++)
+    prob[i] = (cnnOutput->data.int8[i] - outZero) * outScale;
+
+  return prob[0] >= prob[1] ? 0 : 1;
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Sample lesen + in Ringpuffer
@@ -1002,6 +1210,67 @@ static void readAndStoreSample() {
   if (bufCount < BUF_N) bufCount++;
 }
 
+// Liefert ein bereits rotiertes Sensor-Sample (g, dps) für den PC-Trainings-
+// Stream. Die Rotation in das Trainings-Koordinatensystem entspricht exakt
+// dem Pfad der CNN-Inferenz, damit neu gesammelte Daten zum Modell passen.
+static void streamSample() {
+  int16_t ax, ay, az, gx, gy, gz;
+  if (!qmiReadData(ax, ay, az, gx, gy, gz)) return;
+  Vec3 a = {ax * ACCEL_SCALE, ay * ACCEL_SCALE, az * ACCEL_SCALE};
+  Vec3 g = {gx * GYRO_SCALE, gy * GYRO_SCALE, gz * GYRO_SCALE};
+  Vec3 ar, gr;
+  rotVec(R_model, a, ar);
+  rotVec(R_model, g, gr);
+  USBSerial.printf("%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+                   ar.x, ar.y, ar.z, gr.x, gr.y, gr.z);
+}
+
+// Sensor-Aufnahme: rotierte Werte (g, dps) als CSV-Zeile auf die SD-Karte.
+static void sensorRecSample() {
+  int16_t ax, ay, az, gx, gy, gz;
+  if (!qmiReadData(ax, ay, az, gx, gy, gz)) return;
+  Vec3 a = {ax * ACCEL_SCALE, ay * ACCEL_SCALE, az * ACCEL_SCALE};
+  Vec3 g = {gx * GYRO_SCALE, gy * GYRO_SCALE, gz * GYRO_SCALE};
+  Vec3 ar, gr;
+  rotVec(R_model, a, ar);
+  rotVec(R_model, g, gr);
+  sensorRecFile.printf("%s,%u,%d,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n",
+                       sensorRecLabel.c_str(), (unsigned)sensorRecTrial,
+                       sensorRecCount, ar.x, ar.y, ar.z, gr.x, gr.y, gr.z);
+  sensorRecCount++;
+}
+
+static void startSensorRec(const char *label) {
+  if (!ensureSd()) {
+    USBSerial.println("[sdrec] SD-Karte nicht bereit!");
+    return;
+  }
+  sensorRecFile = SD_MMC.open("/aufnahme.csv", FILE_APPEND);
+  if (!sensorRecFile) {
+    USBSerial.println("[sdrec] /aufnahme.csv nicht oeffenbar!");
+    return;
+  }
+  if (sensorRecFile.size() == 0) {
+    sensorRecFile.println("label,trial,t,ax,ay,az,gx,gy,gz");
+  }
+  sensorRecLabel = label;
+  sensorRecTrial = recTrialCounter++;
+  prefs.putInt("recTrial", recTrialCounter);
+  sensorRecCount = 0;
+  sensorRec = true;
+  sensorRecNextUs = micros();
+  USBSerial.printf("[sdrec] Aufnahme %s #%u gestartet\n", label, (unsigned)sensorRecTrial);
+}
+
+static void stopSensorRec() {
+  if (sensorRecFile) {
+    sensorRecFile.flush();
+    sensorRecFile.close();
+  }
+  sensorRec = false;
+  USBSerial.printf("[sdrec] Aufnahme beendet (%d Samples)\n", sensorRecCount);
+}
+
 // ---------------------------------------------------------------------------
 // Auswertung (Merkmale + Modell + Zustandsmaschine)
 // ---------------------------------------------------------------------------
@@ -1017,46 +1286,50 @@ static void evaluate() {
   float dotN = vdot(vk, N_dir);
 
   // Langes Fenster -> Modell (im Trainings-Koordinatensystem)
+#if USE_CNN
+  aktuellKlasse = predictClassCNN(aktuellProb);
+#else
   Stats lang = computeStats(FENSTER);
   Vec3 mSensor = {lang.mx, lang.my, lang.mz};
   Vec3 mRot;
   rotVec(R_model, vnorm(mSensor), mRot);
   aktuellKlasse = predictClass(mRot, lang.accStd, lang.gmean, lang.gmax, aktuellProb);
+#endif
 
   unsigned long now = millis();
 
   static unsigned long lastDbgMs = 0;
   if (now - lastDbgMs >= 2000) {
     lastDbgMs = now;
-    USBSerial.printf("[dbg] score=%+.2f enter=%.2f dotH=%.2f dotN=%.2f klasse=%d p(m/k/t)=%d/%d/%d%% hoch=%d\n",
+    USBSerial.printf("[dbg] score=%+.2f enter=%.2f dotH=%.2f dotN=%.2f klasse=%d p(m/n)=%d/%d%% hoch=%d\n",
                      aktuellScore, enterHoch, dotH, dotN, aktuellKlasse,
                      (int)(aktuellProb[0] * 100), (int)(aktuellProb[1] * 100),
-                     (int)(aktuellProb[2] * 100), imHoch ? 1 : 0);
+                     imHoch ? 1 : 0);
   }
 
   if (!imHoch) {
     if (aktuellScore > enterHoch) {
       imHoch = true;
       hochSeitMs = now;
-      hochKopf = false;
-      hochKopfCount = 0;
+      hochNicht = false;
+      hochNichtCount = 0;
       hochMeldungCount = 0;
       USBSerial.printf("[zustand] ARM OBEN (score=%.2f)\n", aktuellScore);
     }
   } else {
-    // Modell beobachten: KOPF unterdrückt die Zählung nur, wenn er
-    // während der "oben"-Phase überwiegt (robuster gegen kurze Ausreißer).
-    if (aktuellKlasse == 0) hochKopfCount++;
-    else if (aktuellKlasse == 1) hochMeldungCount++;
+    // Modell beobachten: wenn während "oben" überwiegend NICHT-MELDEN
+    // erkannt wird, zählt es nicht (z. B. Kopfkratzen, Winken, kleine Bewegungen).
+    if (aktuellKlasse == 0) hochMeldungCount++;
+    else hochNichtCount++;
 
     if (aktuellScore < LEAVE_HOCH) {
       unsigned long dauer = now - hochSeitMs;
-      hochKopf = (hochKopfCount > hochMeldungCount);
+      hochNicht = (hochNichtCount > hochMeldungCount);
       bool zaehlt = (dauer >= MIN_HALTEN_MS) &&
                     (now - letzteMeldungMs > SPERRE_MS) &&
-                    !hochKopf;
-      USBSerial.printf("[zustand] arm unten (dauer=%lums klasse=%d kopfC=%d meldC=%d zaehlt=%d)\n",
-                       dauer, aktuellKlasse, hochKopfCount, hochMeldungCount,
+                    !hochNicht;
+      USBSerial.printf("[zustand] arm unten (dauer=%lums klasse=%d meldC=%d nichtC=%d zaehlt=%d)\n",
+                       dauer, aktuellKlasse, hochMeldungCount, hochNichtCount,
                        zaehlt ? 1 : 0);
       if (zaehlt) {
         registerMeldung(dauer);
@@ -1166,9 +1439,11 @@ static Vec3 collectArmUnten() {
   for (int i = 1; i <= CAL_REPS; i++) {
     snprintf(rep, sizeof(rep), "Wiederholung %d/%d", i, CAL_REPS);
     calibScreen("Arm UNTEN halten", rep, 0);
+    vibrate(VIB_REP_MS);
     Vec3 v = collectStaticRep(1500);
     Nsum = {Nsum.x + v.x, Nsum.y + v.y, Nsum.z + v.z};
   }
+  vibrate(VIB_SCHRITT_MS);
   return vnorm(Nsum);
 }
 
@@ -1179,9 +1454,11 @@ static Vec3 collectArmHoch() {
   for (int i = 1; i <= CAL_REPS; i++) {
     snprintf(rep, sizeof(rep), "Wiederholung %d/%d", i, CAL_REPS);
     calibScreen("Arm HOCH halten", rep, 0);
+    vibrate(VIB_REP_MS);
     Vec3 v = collectStaticRep(1500);
     Hsum = {Hsum.x + v.x, Hsum.y + v.y, Hsum.z + v.z};
   }
+  vibrate(VIB_SCHRITT_MS);
   return vnorm(Hsum);
 }
 
@@ -1192,9 +1469,11 @@ static float collectNichtMelden() {
   for (int i = 1; i <= CAL_REPS; i++) {
     snprintf(rep, sizeof(rep), "Wiederholung %d/%d", i, CAL_REPS);
     calibScreen("NICHT MELDEN", rep, 0);
+    vibrate(VIB_REP_MS);
     float s = collectNormalRep(1500);
     if (s > maxScore) maxScore = s;
   }
+  vibrate(VIB_SCHRITT_MS);
   return maxScore;
 }
 
@@ -1205,9 +1484,11 @@ static Vec3 collectTisch() {
   for (int i = 1; i <= CAL_REPS; i++) {
     snprintf(rep, sizeof(rep), "Wiederholung %d/%d", i, CAL_REPS);
     calibScreen("TISCH halten", rep, 0);
+    vibrate(VIB_REP_MS);
     Vec3 v = collectStaticRep(1500);
     Tsum = {Tsum.x + v.x, Tsum.y + v.y, Tsum.z + v.z};
   }
+  vibrate(VIB_SCHRITT_MS);
   return vnorm(Tsum);
 }
 
@@ -1352,7 +1633,7 @@ static void drawViewCounter() {
   centerText(355, zustand, zc, 3);
 
   // Position aus Modell
-  const char *posName[3] = {"KOPF", "MELDUNG", "TISCH"};
+  const char *posName[2] = {"MELDUNG", "NICHT MELDEN"};
   snprintf(buf, sizeof(buf), "Pos: %s  p=%d%%",
            posName[aktuellKlasse], (int)(aktuellProb[aktuellKlasse] * 100));
   centerText(398, buf, CYAN, 2);
@@ -1786,8 +2067,8 @@ static void setSensorOn(bool on) {
     sampleCounter = 0;
     nextSampleUs = micros();
     imHoch = false;
-    hochKopf = false;
-    hochKopfCount = 0;
+    hochNicht = false;
+    hochNichtCount = 0;
     hochMeldungCount = 0;
   }
   USBSerial.printf("Sensor %s\n", on ? "AN" : "AUS");
@@ -2097,10 +2378,17 @@ static void btEnable() {
     pCharLesson->setValue(buildLessonJson().c_str());
     pService->start();
     bleInited = true;
+    BLEAdvertising *pAdv = BLEDevice::getAdvertising();
+    if (pAdv) {
+      pAdv->addServiceUUID(BLE_SERVICE_UUID);
+    }
   }
   BLEAdvertising *pAdv = BLEDevice::getAdvertising();
   if (pAdv) {
-    pAdv->addServiceUUID(BLE_SERVICE_UUID);
+    // Langes Advertising-Intervall (1-2 s statt ~100 ms) spart deutlich Akku,
+    // solange keine Verbindung zur App besteht.
+    pAdv->setMinInterval(1600);   // 1600 * 0,625 ms = 1 s
+    pAdv->setMaxInterval(3200);   // 3200 * 0,625 ms = 2 s
     pAdv->start();
   }
   btOn = true;
@@ -2129,32 +2417,32 @@ static void drawAppTray() {
   snprintf(buf, sizeof(buf), "Heute: %d", totalHeute);
   textCenterX(120, 190, buf, BLACK, 2);
 
-  // Rekorder
-  canvas->fillRoundRect(210, 100, 160, 120, 16, 0x9FE0);
-  canvas->drawRoundRect(210, 100, 160, 120, 16, GREEN);
-  textCenterX(290, 135, "REKORDER", BLACK, 2);
-  textCenterX(290, 165, "Sprach-", BLACK, 2);
-  textCenterX(290, 190, "notizen", BLACK, 2);
-
   // Einstellungen
-  canvas->fillRoundRect(40, 230, 160, 120, 16, 0xE5A0);
-  canvas->drawRoundRect(40, 230, 160, 120, 16, YELLOW);
-  textCenterX(120, 265, "EINSTEL-", BLACK, 2);
-  textCenterX(120, 290, "LUNGEN", BLACK, 2);
-  textCenterX(120, 320, "WiFi/BT", BLACK, 2);
+  canvas->fillRoundRect(210, 100, 160, 120, 16, 0xE5A0);
+  canvas->drawRoundRect(210, 100, 160, 120, 16, YELLOW);
+  textCenterX(290, 135, "EINSTEL-", BLACK, 2);
+  textCenterX(290, 160, "LUNGEN", BLACK, 2);
+  textCenterX(290, 190, "WiFi/BT", BLACK, 2);
 
   // Zeit
-  canvas->fillRoundRect(210, 230, 160, 120, 16, 0xD69A);
-  canvas->drawRoundRect(210, 230, 160, 120, 16, MAGENTA);
-  textCenterX(290, 265, "ZEIT", BLACK, 2);
-  textCenterX(290, 290, "Timer +", BLACK, 2);
-  textCenterX(290, 320, "Stoppuhr", BLACK, 2);
+  canvas->fillRoundRect(40, 230, 160, 120, 16, 0xD69A);
+  canvas->drawRoundRect(40, 230, 160, 120, 16, MAGENTA);
+  textCenterX(120, 265, "ZEIT", BLACK, 2);
+  textCenterX(120, 290, "Timer +", BLACK, 2);
+  textCenterX(120, 320, "Stoppuhr", BLACK, 2);
 
-  // Test (breite Kachel)
+  // Sensor-Aufnahme
+  canvas->fillRoundRect(210, 230, 160, 120, 16, 0xFC18);
+  canvas->drawRoundRect(210, 230, 160, 120, 16, GREEN);
+  textCenterX(290, 265, "SENSOR-", BLACK, 2);
+  textCenterX(290, 290, "AUFNAHME", BLACK, 2);
+  textCenterX(290, 320, "Trainingsdaten", BLACK, 2);
+
+  // Test
   canvas->fillRoundRect(40, 360, 330, 72, 14, 0xBDF7);
   canvas->drawRoundRect(40, 360, 330, 72, 14, WHITE);
   textCenterX(205, 380, "TEST", BLACK, 3);
-  textCenterX(205, 412, "Motor/Ton/Sensor/Akku", BLACK, 2);
+  textCenterX(205, 412, "Motor/Sensor/Akku", BLACK, 2);
 
   drawBackButton();
 }
@@ -2174,38 +2462,28 @@ static void drawTestApp() {
   canvas->setCursor(60, 138);
   canvas->print("kurz vibrieren");
 
-  // Ton
+  // Sensor (live)
   canvas->fillRoundRect(40, 175, 330, 64, 12, 0x18E3);
   canvas->drawRoundRect(40, 175, 330, 64, 12, WHITE);
   canvas->setTextColor(WHITE);
   canvas->setCursor(60, 187);
-  canvas->print("TON");
-  canvas->setTextColor(CYAN);
-  canvas->setCursor(60, 213);
-  canvas->print("440 Hz abspielen");
-
-  // Sensor (live)
-  canvas->fillRoundRect(40, 250, 330, 64, 12, 0x18E3);
-  canvas->drawRoundRect(40, 250, 330, 64, 12, WHITE);
-  canvas->setTextColor(WHITE);
-  canvas->setCursor(60, 262);
   canvas->print("SENSOR");
   if (!sensorOn) {
     snprintf(buf, sizeof(buf), "Sensor AUS");
   } else {
-    const char *posName[3] = {"KOPF", "MELDUNG", "TISCH"};
+    const char *posName[2] = {"MELDUNG", "NICHT MELDEN"};
     snprintf(buf, sizeof(buf), "Pos: %s  p=%d%%", posName[aktuellKlasse],
              (int)(aktuellProb[aktuellKlasse] * 100));
   }
   canvas->setTextColor(CYAN);
-  canvas->setCursor(60, 288);
+  canvas->setCursor(60, 213);
   canvas->print(buf);
 
   // Akku (live)
-  canvas->fillRoundRect(40, 325, 330, 64, 12, 0x18E3);
-  canvas->drawRoundRect(40, 325, 330, 64, 12, WHITE);
+  canvas->fillRoundRect(40, 250, 330, 64, 12, 0x18E3);
+  canvas->drawRoundRect(40, 250, 330, 64, 12, WHITE);
   canvas->setTextColor(WHITE);
-  canvas->setCursor(60, 337);
+  canvas->setCursor(60, 262);
   canvas->print("AKKU");
   uint16_t battMV = pmu.getBattVoltage();
   if (battMV > 0) {
@@ -2215,7 +2493,7 @@ static void drawTestApp() {
     snprintf(buf, sizeof(buf), "kein Akku");
   }
   canvas->setTextColor(CYAN);
-  canvas->setCursor(60, 363);
+  canvas->setCursor(60, 288);
   canvas->print(buf);
 
   // Status
@@ -2228,38 +2506,37 @@ static void drawTestApp() {
   drawBackButton();
 }
 
-static void drawRecorder() {
-  centerText(70, "REKORDER", YELLOW, 3);
-
+static void drawSensorRec() {
+  centerText(60, "SENSOR-AUFNAHME", YELLOW, 3);
   char buf[48];
-  if (recording) {
-    snprintf(buf, sizeof(buf), "Aufnahme... %.1f s", recLen / 64000.0f);
-    centerText(120, buf, RED, 2);
-  } else if (playing) {
-    centerText(120, "Wiedergabe...", GREEN, 2);
-  } else if (recLen > 0) {
-    snprintf(buf, sizeof(buf), "Aufnahme: %.1f s", recLen / 64000.0f);
-    centerText(120, buf, CYAN, 2);
+
+  if (sensorRec) {
+    snprintf(buf, sizeof(buf), "%s #%u", sensorRecLabel.c_str(), (unsigned)sensorRecTrial);
+    centerText(110, buf, RED, 3);
+    snprintf(buf, sizeof(buf), "%d Samples", sensorRecCount);
+    centerText(160, buf, CYAN, 2);
+
+    canvas->fillRoundRect(40, 210, 330, 120, 14, RED);
+    canvas->drawRoundRect(40, 210, 330, 120, 14, WHITE);
+    textCenterX(205, 252, "STOPPEN", WHITE, 4);
+    centerText(390, "Aufnahme laeuft ...", GREEN, 2);
   } else {
-    centerText(120, "Keine Aufnahme", 0x8410, 2);
+    centerText(105, "Klasse antippen:", 0x8410, 2);
+    const char *names[2] = {
+      "MELDUNG",
+      "NICHT MELDEN",
+    };
+    for (int i = 0; i < 2; i++) {
+      int y = 160 + i * 110;
+      canvas->fillRoundRect(40, y, 330, 90, 14, 0x18E3);
+      canvas->drawRoundRect(40, y, 330, 90, 14, WHITE);
+      canvas->setTextSize(3);
+      canvas->setTextColor(WHITE);
+      canvas->setCursor(60, y + 32);
+      canvas->print(names[i]);
+    }
+    centerText(430, "NICHT MELDEN: einfach normal bewegen", 0x8410, 2);
   }
-
-  canvas->fillRoundRect(40, 150, 330, 70, 14, recording ? RED : 0x18E3);
-  canvas->drawRoundRect(40, 150, 330, 70, 14, WHITE);
-  textCenterX(205, 172, recording ? "STOPP" : "AUFNEHMEN", BLACK, 3);
-
-  canvas->fillRoundRect(40, 240, 330, 70, 14, playing ? RED : 0x18E3);
-  canvas->drawRoundRect(40, 240, 330, 70, 14, WHITE);
-  textCenterX(205, 262, playing ? "STOPP" : "ABSPIELEN", BLACK, 3);
-
-  canvas->fillRoundRect(40, 330, 150, 60, 12, 0x4228);
-  canvas->drawRoundRect(40, 330, 150, 60, 12, WHITE);
-  textCenterX(115, 350, "LOESCHEN", WHITE, 2);
-
-  canvas->fillRoundRect(205, 330, 165, 60, 12, 0x18E3);
-  canvas->drawRoundRect(205, 330, 165, 60, 12, WHITE);
-  textCenterX(287, 350, "TESTTON", BLACK, 2);
-
   drawBackButton();
 }
 
@@ -2475,14 +2752,14 @@ static void renderAndFlush() {
     else drawMotor();
   } else if (screen == 3) {
     drawWfPicker();
-  } else if (screen == 5) {
-    drawRecorder();
   } else if (screen == 6) {
     drawMeldeEdit();
   } else if (screen == 7) {
     drawZeitApp();
   } else if (screen == 8) {
     drawTestApp();
+  } else if (screen == 9) {
+    drawSensorRec();
   } else { // screen == 4
     drawAppTray();
   }
@@ -2508,7 +2785,7 @@ static void meldeTap(uint16_t x, uint16_t y);
 static void settingsTap(uint16_t x, uint16_t y);
 static void wfPickerTap(uint16_t x, uint16_t y);
 static void appTrayTap(uint16_t x, uint16_t y);
-static void recorderTap(uint16_t x, uint16_t y);
+static void sensorRecTap(uint16_t x, uint16_t y);
 static void meldeEditTap(uint16_t x, uint16_t y);
 static void zeitAppTap(uint16_t x, uint16_t y);
 static void testAppTap(uint16_t x, uint16_t y);
@@ -2519,10 +2796,10 @@ static void onTap(uint16_t x, uint16_t y) {
   else if (screen == 2) settingsTap(x, y);
   else if (screen == 3) wfPickerTap(x, y);
   else if (screen == 4) appTrayTap(x, y);
-  else if (screen == 5) recorderTap(x, y);
   else if (screen == 6) meldeEditTap(x, y);
   else if (screen == 7) zeitAppTap(x, y);
   else if (screen == 8) testAppTap(x, y);
+  else if (screen == 9) sensorRecTap(x, y);
   // screen 0 (Watchface): Tap ohne Funktion
 }
 
@@ -2606,7 +2883,8 @@ static void handleTouch() {
 static void enterStandby() {
   standby = true;
   screen = 0;                 // beim Aufwachen auf dem Watchface landen
-  gfx->setBrightness(0);
+  touchWasDown = false;
+  gfx->setBrightness(0);      // nur Display aus – Sensor/Motor zählen weiter
   USBSerial.println("[power] Standby (Display aus, Zaehlung laeuft weiter)");
 }
 
@@ -2642,8 +2920,6 @@ static void powerBack() {
     screen = 0;
   } else if (screen == 4) {
     screen = 0;
-  } else if (screen == 5) {
-    screen = 4;
   } else if (screen == 6) {
     if (meldeEditMode == 2) meldeEditMode = 1;
     else if (meldeEditMode == 1) meldeEditMode = 0;
@@ -2651,6 +2927,9 @@ static void powerBack() {
   } else if (screen == 7) {
     screen = 4;
   } else if (screen == 8) {
+    screen = 4;
+  } else if (screen == 9) {
+    if (sensorRec) stopSensorRec();
     screen = 4;
   }
 }
@@ -2672,6 +2951,52 @@ static void bootPress() {
   if (standby) wakeFromStandby();
   screen = 6;
   meldeEditMode = 0;
+}
+
+// Doppel-Klick auf BOOT: TISCH-Richtung neu lernen (Uhr liegt gerade auf dem Tisch).
+static void bootDoublePress() {
+  USBSerial.println("[boot] Doppel-Klick -> TISCH neu kalibrieren");
+  if (!calibrated) {
+    USBSerial.println("[tisch] Noch nicht kalibriert - TISCH-Update ignoriert.");
+    vibrate(120); delay(100); vibrate(120);
+    return;
+  }
+  if (standby) wakeFromStandby();
+
+  canvas->fillScreen(BLACK);
+  centerText(200, "TISCH neu kalibrieren", WHITE, 2);
+  centerText(250, "Uhr liegt auf dem Tisch ...", CYAN, 2);
+  canvas->flush();
+
+  vibrate(100);
+  delay(500);                        // kurz ruhen lassen
+  T_dir = collectStaticRep(2000);    // 2 s ruhig messen
+  tischCalibrated = true;
+
+  // Rotation des Modells mit der neuen TISCH-Richtung neu aufbauen
+  Vec3 T = {REF_TISCH[0], REF_TISCH[1], REF_TISCH[2]};
+  Vec3 M = {REF_MELDUNG[0], REF_MELDUNG[1], REF_MELDUNG[2]};
+  buildRotation(T_dir, H_dir, T, M, R_model);
+  calibrated = true;
+
+  prefs.putInt("calibT", 1);
+  prefs.putFloat("Tx", T_dir.x);
+  prefs.putFloat("Ty", T_dir.y);
+  prefs.putFloat("Tz", T_dir.z);
+
+  bufHead = 0;
+  bufCount = 0;
+
+  vibrate(VIB_SCHRITT_MS);           // längere Bestätigung
+
+  canvas->fillScreen(BLACK);
+  centerText(230, "TISCH gespeichert!", GREEN, 3);
+  canvas->flush();
+  delay(1200);
+
+  screen = 0;                        // zurück zum Watchface
+  USBSerial.printf("[tisch] Neue TISCH-Richtung: (%.3f %.3f %.3f)\n",
+                   (double)T_dir.x, (double)T_dir.y, (double)T_dir.z);
 }
 
 static void handleButtons() {
@@ -2696,7 +3021,21 @@ static void handleButtons() {
   } else if (!b && bootBtnWasDown) {
     bootBtnWasDown = false;
     unsigned long d = now - bootDownMs;
-    if (d >= 30 && d < 1500) bootPress();
+    if (d >= 30 && d < 1500) {
+      if (bootDoublePending && (now - bootFirstPressMs) <= BOOT_DOUBLE_MS) {
+        bootDoublePending = false;
+        bootDoublePress();
+      } else {
+        bootDoublePending = true;
+        bootFirstPressMs = now;
+      }
+    }
+  }
+
+  // Einzel-Klick ausführen, wenn kein zweiter Klick folgt
+  if (bootDoublePending && (now - bootFirstPressMs) > BOOT_DOUBLE_MS) {
+    bootDoublePending = false;
+    bootPress();
   }
 }
 
@@ -2739,13 +3078,13 @@ static void appTrayTap(uint16_t x, uint16_t y) {
     screen = 1;
     bufHead = bufCount = 0;
   } else if (inRect(x, y, 210, 100, 160, 120)) {
-    screen = 5;
-  } else if (inRect(x, y, 40, 230, 160, 120)) {
     screen = 2;
     settingsItem = 0;
-  } else if (inRect(x, y, 210, 230, 160, 120)) {
+  } else if (inRect(x, y, 40, 230, 160, 120)) {
     screen = 7;
     zeitTab = 0;
+  } else if (inRect(x, y, 210, 230, 160, 120)) {
+    screen = 9;
   } else if (inRect(x, y, 40, 360, 330, 72)) {
     screen = 8;
   }
@@ -2758,30 +3097,30 @@ static void testAppTap(uint16_t x, uint16_t y) {
     snprintf(testInfo, sizeof(testInfo), "Motor: 300ms");
     testInfoMs = millis();
   } else if (inRect(x, y, 40, 175, 330, 64)) {
-    playTestTone();
-    snprintf(testInfo, sizeof(testInfo), "Ton: 440 Hz");
-    testInfoMs = millis();
-  } else if (inRect(x, y, 40, 250, 330, 64)) {
     snprintf(testInfo, sizeof(testInfo), "Sensor-Daten oben");
     testInfoMs = millis();
-  } else if (inRect(x, y, 40, 325, 330, 64)) {
+  } else if (inRect(x, y, 40, 250, 330, 64)) {
     snprintf(testInfo, sizeof(testInfo), "Akku-Daten oben");
     testInfoMs = millis();
   }
 }
 
-static void recorderTap(uint16_t x, uint16_t y) {
-  if (inBackButton(x, y)) { screen = 4; return; }
-  if (inRect(x, y, 40, 150, 330, 70)) {
-    if (recording) recStopRecording();
-    else recStart();
-  } else if (inRect(x, y, 40, 240, 330, 70)) {
-    if (playing) playStopPlayback();
-    else playStart();
-  } else if (inRect(x, y, 40, 330, 150, 60)) {
-    recClear();
-  } else if (inRect(x, y, 205, 330, 165, 60)) {
-    playTestTone();
+static void sensorRecTap(uint16_t x, uint16_t y) {
+  if (inBackButton(x, y)) {
+    if (sensorRec) stopSensorRec();
+    screen = 4;
+    return;
+  }
+  if (sensorRec) {
+    if (inRect(x, y, 40, 210, 330, 120)) stopSensorRec();
+    return;
+  }
+  const char *labels[2] = {"meldung", "nicht_meldung"};
+  for (int i = 0; i < 2; i++) {
+    if (inRect(x, y, 40, 160 + i * 110, 330, 90)) {
+      startSensorRec(labels[i]);
+      return;
+    }
   }
 }
 
@@ -3065,7 +3404,7 @@ static void handleSerial() {
         } else if (line == "STATS") {
           USBSerial.printf("total=%d session=%d drange=%d richtig=%d falsch=%d view=%d klasse=%d p(meldung)=%d%%\n",
                            totalHeute, sessionCount, drange, richtig, falsch, view, aktuellKlasse,
-                           (int)(aktuellProb[1] * 100));
+                           (int)(aktuellProb[0] * 100));
         } else if (line == "CALIB") {
           USBSerial.printf("N=(%.3f %.3f %.3f) H=(%.3f %.3f %.3f) enterHoch=%.3f seitCalib=%d\n",
                            N_dir.x, N_dir.y, N_dir.z, H_dir.x, H_dir.y, H_dir.z,
@@ -3102,21 +3441,15 @@ static void handleSerial() {
                                ttDays[d][p].eh, ttDays[d][p].em, lessonCounts[d][p]);
             }
           }
-        } else if (line == "TON") {
-          playTestTone();
-        } else if (line == "PEAK") {
-          int16_t pk = recPeak();
-          USBSerial.printf("Aufnahme: %lu Bytes, Peak=%d (%.1f%%)\n",
-                           (unsigned long)recLen, pk, pk * 100.0f / 32767.0f);
-        } else if (line == "REC") {
-          recStart();
-          USBSerial.println("Aufnahme gestartet.");
-        } else if (line == "STOP") {
-          recStopRecording();
-          USBSerial.println("Aufnahme gestoppt.");
         } else if (line == "VIB") {
           USBSerial.println("Vibrationstest ...");
           vibrate(300);
+        } else if (line == "SENSOR") {
+          USBSerial.printf("Sensor %s\n", sensorOn ? "AN" : "AUS");
+        } else if (line == "SENSOR ON") {
+          setSensorOn(true);
+        } else if (line == "SENSOR OFF") {
+          setSensorOn(false);
         } else if (line.startsWith("TIME ")) {
           RTC_Time t; rtcRead(t);
           int hh, mm, ss;
@@ -3133,8 +3466,46 @@ static void handleSerial() {
             rtcWrite(t);
             USBSerial.println("OK Datum gesetzt");
           }
+        } else if (line == "STREAM") {
+          streamMode = true;
+          nextStreamUs = micros();
+          USBSerial.println("STREAMING");
+        } else if (line == "STOPSTREAM") {
+          streamMode = false;
+          bufHead = 0; bufCount = 0;
+          nextSampleUs = micros();
+          USBSerial.println("OK stream stop");
+        } else if (line.startsWith("RECSD ")) {
+          String lbl = line.substring(6);
+          lbl.trim();
+          if (lbl == "meldung" || lbl == "nicht_meldung") {
+            startSensorRec(lbl.c_str());
+          } else {
+            USBSerial.println("Unbekannte Klasse (meldung/nicht_meldung)");
+          }
+        } else if (line == "RECSD") {
+          USBSerial.println("Syntax: RECSD meldung|nicht_meldung");
+        } else if (line == "STOPSD") {
+          if (sensorRec) stopSensorRec();
+          else USBSerial.println("Keine Sensor-Aufnahme aktiv");
+        } else if (line == "SDCHECK") {
+          if (!ensureSd()) {
+            USBSerial.println("SD nicht bereit");
+          } else {
+            File f = SD_MMC.open("/aufnahme.csv", FILE_READ);
+            if (!f) {
+              USBSerial.println("kein /aufnahme.csv");
+            } else {
+              USBSerial.printf("aufnahme.csv: %u Bytes\n", (unsigned)f.size());
+              for (int i = 0; i < 4 && f.available(); i++) {
+                String l = f.readStringUntil('\n');
+                USBSerial.println(l);
+              }
+              f.close();
+            }
+          }
         } else {
-          USBSerial.println("Unbekannt. Befehle: RESET, CAL, CALIB, STATS, VIB, TIME HH:MM:SS, DATE DD.MM.YY");
+          USBSerial.println("Unbekannt. Befehle: RESET, CAL, CALIB, STATS, VIB, SENSOR, STREAM, STOPSTREAM, RECSD, STOPSD, SDCHECK, TIME HH:MM:SS, DATE DD.MM.YY");
         }
       }
       line = "";

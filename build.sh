@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Build-Skript für den Meldezähler.
 #
-#   ./build.sh firmware   – Firmware kompilieren (UhrMeldezaehler)
-#   ./build.sh upload     – Firmware kompilieren + auf die Uhr flashen
+#   ./build.sh firmware   – Firmware kompilieren + automatisch auf die Uhr flashen
+#   ./build.sh upload     – Firmware kompilieren + flashen (explizit, ggf. PORT=...)
 #   ./build.sh app        – Flutter-APKs bauen und ins Projektverzeichnis kopieren
-#   ./build.sh all        – Firmware + App (Standard)
+#   ./build.sh all        – Firmware (mit Auto-Upload) + App (Standard)
+#
+# Der Port wird automatisch erkannt (/dev/ttyACM* bzw. /dev/ttyUSB*).
+# Mit PORT=/dev/ttyACM0 kann ein fester Port erzwungen werden.
 #
 # Voraussetzungen: arduino-cli + esp32-Core, Flutter SDK.
 
@@ -17,9 +20,49 @@ cd "$(dirname "$0")"
 FQBN="${FQBN:-esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi}"
 SKETCH="UhrMeldezaehler"
 
+# Port automatisch finden: PORT-Env hat Vorrang, sonst erstes /dev/ttyACM* bzw. /dev/ttyUSB*.
+detect_port() {
+  if [ -n "${PORT:-}" ]; then
+    echo "$PORT"
+    return 0
+  fi
+  local p
+  for p in /dev/ttyACM* /dev/ttyUSB*; do
+    if [ -e "$p" ]; then
+      echo "$p"
+      return 0
+    fi
+  done
+  return 1
+}
+
 build_firmware() {
   echo "==> Kompiliere Firmware (${FQBN}) ..."
   arduino-cli compile --fqbn "${FQBN}" "${SKETCH}"
+
+  local port
+  if port="$(detect_port)"; then
+    echo "==> Uhr gefunden auf ${port} -> flashe automatisch ..."
+    arduino-cli upload --fqbn "${FQBN}" -p "${port}" "${SKETCH}"
+  else
+    echo "==> Keine Uhr gefunden (/dev/ttyACM*, /dev/ttyUSB*). Nur kompiliert."
+    echo "    Flashen mit: ./build.sh upload   oder  PORT=/dev/... ./build.sh firmware"
+  fi
+}
+
+upload_firmware() {
+  local port
+  if [ -n "${PORT:-}" ]; then
+    port="$PORT"
+  elif port="$(detect_port)"; then
+    :
+  else
+    echo "FEHLER: Keine Uhr gefunden. Port mit PORT=/dev/ttyACM0 angeben." >&2
+    exit 1
+  fi
+  echo "==> Kompiliere + flashe Firmware (${FQBN}) auf ${port} ..."
+  arduino-cli compile --fqbn "${FQBN}" "${SKETCH}"
+  arduino-cli upload  --fqbn "${FQBN}" -p "${port}" "${SKETCH}"
 }
 
 build_app() {
@@ -29,13 +72,6 @@ build_app() {
   echo "==> Kopiere APKs ins Projektverzeichnis ..."
   cp -v MeldeApp/build/app/outputs/flutter-apk/app-arm64-v8a-release.apk Meldezaehler-App-arm64.apk
   cp -v MeldeApp/build/app/outputs/flutter-apk/app-release.apk            Meldezaehler-App-universal.apk
-}
-
-upload_firmware() {
-  local port="${PORT:-/dev/ttyACM0}"
-  echo "==> Kompiliere + flashe Firmware (${FQBN}) auf ${port} ..."
-  arduino-cli compile --fqbn "${FQBN}" "${SKETCH}"
-  arduino-cli upload  --fqbn "${FQBN}" -p "${port}" "${SKETCH}"
 }
 
 case "${1:-all}" in

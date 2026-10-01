@@ -5,6 +5,10 @@ void setup() {
   delay(300);
   USBSerial.println("\n=== MELDEZAEHLER Uhr-App ===");
 
+  // Akku sparen: WLAN aus, CPU-Takt senken (BLE/Display/Sensor laufen damit problemlos)
+  WiFi.mode(WIFI_OFF);
+  setCpuFrequencyMhz(160);
+
   Wire.begin(IIC_SDA, IIC_SCL);
 
   // PMU (Akku) – begin() setzt Wire ggf. neu auf, daher Clock erst danach
@@ -58,6 +62,7 @@ void setup() {
   watchface = prefs.getInt("wf", 0);
   if (watchface < 0 || watchface > 5) watchface = 0;
   sensorOn = prefs.getInt("sensorOn", 1) == 1;
+  recTrialCounter = prefs.getInt("recTrial", 1000);
   motorOn = prefs.getInt("motorOn", 1) == 1;
   muteInLessons = prefs.getInt("muteLessons", 0) == 1;
   lastSession = prefs.getInt("lastSession", 0);
@@ -140,9 +145,6 @@ void setup() {
   // Bluetooth (BLE) automatisch aktivieren, damit die Handy-App die Uhr findet
   btEnable();
 
-  // Audio (Rekorder): I2S + ES8311 + ES7210 initialisieren
-  audioInit();
-
   USBSerial.println("Bereit! Meldebewegung machen.");
 }
 
@@ -153,8 +155,25 @@ void loop() {
   unsigned long nowUs = micros();
   unsigned long nowMs = millis();
 
-  // 1) Sensor @100 Hz (nur wenn die Erkennung eingeschaltet ist)
-  if (sensorOn) {
+  // 1) Sensor: Streaming / SD-Aufnahme / normale Erkennung @100 Hz
+  //    (läuft auch im Standby weiter, damit Meldungen weiter gezählt werden)
+  if (streamMode) {
+    int catches = 0;
+    while ((long)(nowUs - nextStreamUs) >= 0 && catches < 5) {
+      nextStreamUs += 10000;
+      streamSample();
+      catches++;
+    }
+    if (catches >= 5) nextStreamUs = nowUs;  // zu weit hinten -> neu aufsetzen
+  } else if (sensorRec) {
+    int catches = 0;
+    while ((long)(nowUs - sensorRecNextUs) >= 0 && catches < 5) {
+      sensorRecNextUs += 10000;
+      sensorRecSample();
+      catches++;
+    }
+    if (catches >= 5) sensorRecNextUs = nowUs;  // zu weit hinten -> neu aufsetzen
+  } else if (sensorOn) {
     int catches = 0;
     while ((long)(nowUs - nextSampleUs) >= 0 && catches < 5) {
       nextSampleUs += 10000;
@@ -179,19 +198,19 @@ void loop() {
     minuteStartMs += minuteElapsed * 60000UL;
   }
 
-  // 3) Display @ ~15 Hz
+  // 3) Display @ ~5 Hz (statt 15 Hz – spart Strom; Sekundenzeiger tickt eh nur 1x/s)
   static unsigned long lastDrawMs = 0;
-  if (nowMs - lastDrawMs >= 66) {
+  if (nowMs - lastDrawMs >= 200) {
     lastDrawMs = nowMs;
     updateEnv();
-    if (!standby) renderAndFlush();
+    if (!standby && !streamMode) renderAndFlush();
   }
 
-  // 4) Touch @ ~30 Hz
+  // 4) Touch @ ~30 Hz (im Standby kein Touch-Pollen – Aufwachen nur per Power)
   static unsigned long lastTouchMs = 0;
   if (nowMs - lastTouchMs >= 30) {
     lastTouchMs = nowMs;
-    if (!standby) handleTouch();
+    if (!standby && !streamMode) handleTouch();
   }
 
   // 5) Tasten (Power + Boot)

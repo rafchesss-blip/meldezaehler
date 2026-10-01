@@ -11,12 +11,14 @@ Statistiken sowie den Stundenplan an.
 Meldezähler/
 ├── UhrMeldezaehler/           Firmware für die Uhr (Arduino, ESP32-S3)
 │   ├── UhrMeldezaehler.ino    setup() + loop()
-│   ├── UhrMeldezaehler_core.h gesamte App-Logik (UI, Sensor, BLE, Audio)
-│   └── audio_codec.h          ES8311/ES7210 Audio-Treiber (Rekorder)
+│   ├── UhrMeldezaehler_core.h gesamte App-Logik (UI, Sensor, BLE)
 ├── MeldeApp/                  Flutter-Begleit-App (Android)
 ├── meldedaten/                aufgenommene Trainingsdaten (CSV)
 ├── trainieren.py              Training Meldebewegung (RandomForest/LogReg)
 ├── trainieren_positionen.py   Training 3-Zonen-Klassifikator (kopf/meldung/tisch)
+├── trainieren_cnn.py          Training CNN (1D-ConvNet, 2 Klassen)
+├── konvertiere_cnn_tflite.py  CNN → int8-TFLite (für die Uhr)
+├── patch_tflite_lib.sh        Patches für die TensorFlowLite_ESP32-Bibliothek
 ├── anlernen*.py               Datenerfassung (ältere ESP32-C3 + MPU6050-Hardware)
 ├── live_*.py                  Live-Erkennung/Animation am PC (ältere Hardware)
 ├── VibrationTest/             Test-Sketch für den Vibrationsmotor
@@ -31,13 +33,20 @@ Meldezähler/
   - FT3168 (Touch) → Bedienung
   - AXP2101 (PMU) → Akku
   - PCF85063 (RTC) → Uhrzeit
-  - ES8311 + ES7210 → Lautsprecher/Mikrofon (Rekorder)
+  - Vibrationsmotor an GPIO18
   - Vibrationsmotor an GPIO18
 
 ## Firmware bauen & flashen
 
 Voraussetzungen: `arduino-cli`, ESP32-Core (`esp32:esp32`), Bibliotheken
-`Arduino_GFX_Library` und `XPowersLib`.
+`Arduino_GFX_Library`, `XPowersLib` und `TensorFlowLite_ESP32`.
+
+> **TensorFlowLite_ESP32 patchen:** Die Bibliothek braucht zwei kleine Patches,
+> um mit dem ESP32-Core 3.x / GCC 14 zu kompilieren. Einmalig ausführen:
+>
+> ```bash
+> ./patch_tflite_lib.sh
+> ```
 
 ```bash
 # Waveshare ESP32-S3-Touch-AMOLED-2.06 (16 MB Flash + 8 MB OPI-PSRAM):
@@ -45,14 +54,18 @@ arduino-cli compile --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=hu
 arduino-cli upload  --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi" -p /dev/ttyACM0 UhrMeldezaehler
 
 # oder bequem per Skript:
-./build.sh firmware
+./build.sh firmware    # kompiliert + flasht AUTOMATISCH (Port wird erkannt)
 ```
+
+> `./build.sh firmware` sucht den Port selbst (/dev/ttyACM* oder /dev/ttyUSB*)
+> und flasht direkt nach dem Kompilieren. Fester Port erzwingbar mit
+> `PORT=/dev/ttyACM0 ./build.sh firmware`. Ohne angeschlossene Uhr wird nur
+> kompiliert.
 
 > **Wichtig:**
 > - Mit der Standard-4-MB-Partition wäre die Firmware zu **99 % voll** und
->   der Rekorder hätte keinen PSRAM-Puffer. Deshalb immer `FlashSize=16M`,
->   `PartitionScheme=huge_app` (3 MB APP) und `PSRAM=opi` verwenden.
-> - Ohne PSRAM deaktiviert sich der Rekorder sauber selbst, der Rest läuft trotzdem.
+>   Deshalb immer `FlashSize=16M`, `PartitionScheme=huge_app` (3 MB APP)
+>   und `PSRAM=opi` verwenden.
 
 ### Serielle Befehle (USB, 115200 Baud)
 
@@ -68,7 +81,11 @@ arduino-cli upload  --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=hu
 | `TT` | Stundenplan ausgeben |
 | `RESTORE …` | Kalibrierung wiederherstellen |
 | `VIB` | Vibrationstest |
-| `TON` / `REC` / `STOP` / `PEAK` | Audio-Tests |
+| – (Audio-Funktionen entfernt) | spart Akku |
+| `STREAM` / `STOPSTREAM` | Rohdaten-Stream für PC-Training (100 Hz, rotiert, g/dps) |
+| `SENSOR` / `SENSOR ON` / `SENSOR OFF` | Erkennung anzeigen / ein- / ausschalten |
+| `RECSD <klasse>` / `STOPSD` | Sensor-Aufnahme auf SD starten/stoppen (`meldung`/`nicht_meldung`) |
+| `SDCHECK` | Größe + erste Zeilen von `/aufnahme.csv` anzeigen |
 
 ## Flutter-App bauen
 
@@ -119,9 +136,11 @@ SAVE
 1. **Kalibrierung beim ersten Start:** Arm UNTEN und Arm HOCH halten (je 10×),
    optional TISCH. Daraus werden die personenabhängigen Schwerkraft-Richtungen
    gelernt und eine Rotation in das Trainings-Koordinatensystem berechnet.
-2. **Live:** 100 Hz Sensor → Merkmale (Schwerkraft-Richtung, Beschleunigungs-
-   Streuung, Drehraten) → eingebettetes LogisticRegression-Modell (3 Klassen:
-   `kopf`/`meldung`/`tisch`).
+2. **Live:** 100 Hz Sensor → 1,5-s-Fenster (150 Samples × 6 Kanäle) wird in das
+   Trainings-Koordinatensystem rotiert, standardisiert und an ein eingebettetes
+   **int8-quantisiertes 1D-CNN** (TensorFlow Lite Micro) übergeben
+   (2 Klassen: `meldung`/`nicht_meldung`). Umschaltbar per `USE_CNN` in
+   `UhrMeldezaehler_core.h` (0 = bisherige LogisticRegression).
 3. **Zustandsmaschine:** Arm unten → oben (≥ 0,5 s halten) → unten zählt eine
    Meldung – aber nur, wenn die Position überwiegend `meldung` war (Kopfkratzen
    zählt nicht). Mindestabstand zwischen Meldungen: 2,5 s.
@@ -132,11 +151,109 @@ SAVE
 python3 trainieren.py            # Meldebewegung (RandomForest + LogReg)
 python3 trainieren_positionen.py # 3-Zonen-Klassifikator → modell_positionen.joblib
 python3 verify_model.py          # prüft: eingebettetes C-Modell == trainiertes Modell
+python3 trainieren_cnn.py        # CNN (2 Klassen) → modell_cnn.keras
+python3 konvertiere_cnn_tflite.py # CNN → modell_cnn_int8.tflite + modell_cnn_data.h
 ```
+
+### Trainingsdaten mit der Uhr sammeln (so viel du willst)
+
+Mit `uhr_daten_sammeln.py` kannst du direkt auf der Uhr beliebig viele
+gelabelte Daten aufnehmen und danach das CNN auf dem PC neu trainieren.
+Die Uhr streamt die Sensorwerte bereits **rotiert ins Trainings-
+Koordinatensystem** und in **physikalischen Einheiten** (g / dps) – exakt der
+Datenpfad, den auch die CNN-Inferenz verwendet.
+
+```bash
+python3 uhr_daten_sammeln.py
+```
+
+Bedienung am PC (ein Tastendruck, kein ENTER):
+
+| Taste | Bedeutung |
+|-------|-----------|
+| `1` | **MELDUNG** – Arm strecken, Hand über den Kopf, oben halten |
+| `2` | **NICHT MELDEN** – normal bewegen, herumlaufen, kleine Bewegungen |
+| `q` | beenden |
+
+> Das CNN hat bewusst nur **2 Klassen**: `meldung` und `nicht_meldung`.
+> Für „nicht melden“ einfach ganz normal bewegen (herumlaufen, kleine
+> Bewegungen) – so lernt das Modell, dass diese Dinge **keine** Meldung sind.
+> Alte Labels (`kopf`/`tisch`/`boden`) werden beim Training automatisch zu
+> `nicht_meldung` zusammengefasst.
+
+**Live-Aufnahme:** Sobald du z. B. `1` drückst, wird ab sofort jedes
+ankommende Sample als `meldung` gespeichert – so lange, bis du eine andere
+Zahl drückst (dann wird auf die neue Klasse umgeschaltet) oder `q` drückst.
+Jeder Tastendruck startet einen neuen Trial der gedrückten Klasse. Jede
+Position mindestens ~1,5 s halten, sonst ist der Trial zu kurz fürs Training.
+Die Daten landen in `meldedaten/uhr_positionen.csv`.
+
+Danach CNN neu trainieren und in die Uhr einbetten:
+
+```bash
+python3 trainieren_cnn.py meldedaten/uhr_positionen.csv
+python3 konvertiere_cnn_tflite.py meldedaten/uhr_positionen.csv  # auch CNN_MEAN/CNN_STD
+./build.sh firmware
+```
+
+### Aufnahme direkt auf der Uhr (ganz ohne PC)
+
+Die Uhr kann Trainingsdaten auch **allein** auf die SD-Karte aufnehmen:
+
+1. Auf der Uhr: `Apps` → Kachel **`SENSOR-AUFNAHME`**.
+2. Klasse antippen: `MELDUNG` oder `NICHT MELDEN`.
+3. Es wird sofort auf die SD-Karte (`/aufnahme.csv`) geschrieben – so lange,
+   bis du **`STOPPEN`** (oder die Zurück-Taste) drückst.
+4. SD-Karte in den PC stecken, `/aufnahme.csv` nach `meldedaten/` kopieren
+   und trainieren:
+
+```bash
+python3 trainieren_cnn.py meldedaten/aufnahme.csv
+```
+
+Die Trial-Nummern der Uhr-Aufnahmen beginnen bei `1000`, damit sie nicht mit
+den PC-Aufnahmen kollidieren. Alternativ per seriellem Befehl:
+`RECSD meldung` … `STOPSD` (Kontrolle mit `SDCHECK`).
+
+> **Wichtig:** Die Uhr muss vor dem Sammeln kalibriert sein (beim ersten
+> Start einmal Arm UNTEN / Arm HOCH halten). Die Kalibrierung liefert die
+> Rotation, ohne die die Daten nicht ins Trainings-Koordinatensystem passen.
 
 Die Koeffizienten des finalen Modells sind als C-Arrays in
 `UhrMeldezaehler_core.h` eingebettet (`SCALER_*`, `COEF_*`, `INTERCEPT_*`).
 Nach einem Neutraining mit `verify_model.py` prüfen, ob die C-Arrays aktuell sind.
+
+#### CNN auf der Uhr
+
+Das CNN wird als int8-TFLite-Modell direkt in die Firmware eingebettet
+(`UhrMeldezaehler/modell_cnn_data.h`, aus `modell_cnn_int8.tflite` erzeugt).
+Die Firmware nutzt TensorFlow Lite Micro und legt das Modell zur Laufzeit in
+einer 32-KB-Arena ab (`CNN_ARENA_SIZE` in `UhrMeldezaehler_core.h`).
+
+> **Speicherort:** Das Modell (~19,6 KB) steckt standardmäßig als `const`-Array
+> im **16-MB-Flash** (im App-Image).
+>
+> **Optional von der SD-Karte:** Die Uhr hat einen microSD-Slot. Liegt im
+> Wurzelverzeichnis der SD-Karte eine Datei **`model.tflite`** (FAT32, int8-
+> quantisiert), lädt die Uhr dieses Modell beim Start – sonst automatisch das
+> eingebaute Flash-Modell. So kann man ein neues Modell ausprobieren, ohne die
+> Firmware neu zu flashen. Dafür `modell_cnn_int8.tflite` in `model.tflite`
+> umbenennen und auf die SD-Karte kopieren.
+
+Modell + C-Header neu erzeugen:
+
+```bash
+python3 trainieren_cnn.py [datei.csv]
+python3 konvertiere_cnn_tflite.py [datei.csv]   # erzeugt .tflite + modell_cnn_data.h + aktualisiert CNN_MEAN/CNN_STD
+```
+
+Ohne Argument wird die historische Datei `meldedaten/positionen.csv` (rohe
+LSB-Werte) verwendet; mit Argument z. B. die mit der Uhr gesammelten Daten
+`meldedaten/uhr_positionen.csv` (physikalische Einheiten). Die Skripte erkennen
+die Einheiten automatisch.
+
+Das CNN ist per `#define USE_CNN 1` (in `UhrMeldezaehler_core.h`) aktiv;
+mit `USE_CNN 0` fällt die Uhr auf die bisherige LogisticRegression zurück.
 
 ## Werks-Firmware wiederherstellen
 
