@@ -18,7 +18,7 @@ void setup() {
 
   // Akku sparen: WLAN aus, CPU-Takt senken (BLE/Display/Sensor laufen damit problemlos)
   WiFi.mode(WIFI_OFF);
-  setCpuFrequencyMhz(160);
+  setCpuFrequencyMhz(240);   // 240 MHz im Betrieb (flüssige UI + CNN), 160 MHz nur im Standby
 
   Wire.begin(IIC_SDA, IIC_SCL);
 
@@ -42,7 +42,7 @@ void setup() {
   Wire.setClock(400000);
 
   // Display
-  if (!canvas->begin()) {
+  if (!canvas->begin(80000000)) {   // QSPI 80 MHz statt 40 MHz – halbiert die Flush-Zeit (flüssigeres UI)
     USBSerial.println("Display init fehlgeschlagen!");
   }
   canvas->fillScreen(BLACK);
@@ -167,6 +167,7 @@ void setup() {
 // Loop
 // ---------------------------------------------------------------------------
 void loop() {
+  unsigned long loopStartUs = micros();
   unsigned long nowUs = micros();
   unsigned long nowMs = millis();
 
@@ -213,10 +214,12 @@ void loop() {
     minuteStartMs += minuteElapsed * 60000UL;
   }
 
-  // 3) Display @ ~5 Hz (statt 15 Hz – spart Strom; Sekundenzeiger tickt eh nur 1x/s)
+  // 3) Display: 1x pro Sekunde (Uhr tickt 1x/s) + sofort nach Interaktion.
+  //    Kein Dauer-Rendern mehr -> Touch/Tasten reagieren ohne Delay.
   static unsigned long lastDrawMs = 0;
-  if (nowMs - lastDrawMs >= 200) {
+  if (nowMs - lastDrawMs >= 1000 || redrawNow) {
     lastDrawMs = nowMs;
+    redrawNow = false;
     updateEnv();
     if (!standby && !streamMode) renderAndFlush();
   }
@@ -239,4 +242,17 @@ void loop() {
 
   // 7) Serielle Befehle
   handleSerial();
+
+  // Performance-Diagnose: max. Loop-Dauer alle 5 s ausgeben
+  {
+    static unsigned long loopMaxUs = 0;
+    static unsigned long loopReportMs = 0;
+    unsigned long d = micros() - loopStartUs;
+    if (d > loopMaxUs) loopMaxUs = d;
+    if (nowMs - loopReportMs > 5000) {
+      loopReportMs = nowMs;
+      USBSerial.printf("[perf] max loop=%lu us\n", loopMaxUs);
+      loopMaxUs = 0;
+    }
+  }
 }

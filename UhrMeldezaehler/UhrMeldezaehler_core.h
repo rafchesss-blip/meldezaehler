@@ -584,6 +584,8 @@ unsigned long testInfoMs = 0;
 bool standby = false;
 bool bootBtnWasDown = false;
 unsigned long bootDownMs = 0;
+// Sofort-Neuzeichnen nach Touch/Taste/Meldung (sonst nur 1x/s)
+bool redrawNow = false;
 // Doppel-Klick-Erkennung (zwei schnelle BOOT-Drücke)
 bool bootDoublePending = false;
 unsigned long bootFirstPressMs = 0;
@@ -912,6 +914,7 @@ static void registerMeldung(unsigned long dauerMs = 0) {
   minuteCount++;
   meldungenSeitCalib++;
   meldeZeitMs += dauerMs;
+  redrawNow = true;   // Zähler sofort aktualisieren
 
   int wd = -1, p = -1;
   if (ttActive && cachedDay >= 1 && cachedMon >= 1) {
@@ -2915,6 +2918,7 @@ static void handleTouch() {
     } else if (dauer > 60 && still) {
       onTap(touchX, touchY);
     }
+    redrawNow = true;   // nach jeder Geste sofort neu zeichnen
   }
 }
 
@@ -2969,6 +2973,7 @@ static void enterStandby() {
   standby = true;
   screen = 0;                 // beim Aufwachen auf dem Watchface landen
   touchWasDown = false;
+  setCpuFrequencyMhz(160);    // Display aus -> weniger CPU reicht
   gfx->setBrightness(0);      // nur Display aus – Sensor/Motor zählen weiter
   gfx->displayOff();          // Display-Controller in Sleep (spart mehr als nur Helligkeit 0)
   USBSerial.println("[power] Standby (Display aus, Zaehlung laeuft weiter)");
@@ -2976,6 +2981,7 @@ static void enterStandby() {
 
 static void wakeFromStandby() {
   standby = false;
+  setCpuFrequencyMhz(240);    // volle CPU für flüssiges UI
   gfx->displayOn();
   gfx->setBrightness(brightness);
   USBSerial.println("[power] Aufgewacht");
@@ -3096,6 +3102,7 @@ static void handleButtons() {
     pmu.getIrqStatus();
     if (pmu.isPekeyShortPressIrq()) {
       pmu.clearIrqStatus();
+      redrawNow = true;
       powerShortPress();
     }
   }
@@ -3111,6 +3118,7 @@ static void handleButtons() {
     if (d >= 30 && d < 1500) {
       if (bootDoublePending && (now - bootFirstPressMs) <= BOOT_DOUBLE_MS) {
         bootDoublePending = false;
+        redrawNow = true;
         bootDoublePress();
       } else {
         bootDoublePending = true;
@@ -3122,6 +3130,7 @@ static void handleButtons() {
   // Einzel-Klick ausführen, wenn kein zweiter Klick folgt
   if (bootDoublePending && (now - bootFirstPressMs) > BOOT_DOUBLE_MS) {
     bootDoublePending = false;
+    redrawNow = true;
     bootPress();
   }
 }
