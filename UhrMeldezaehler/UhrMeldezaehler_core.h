@@ -46,6 +46,7 @@
 #include <Wire.h>
 #include <math.h>
 #include <Preferences.h>
+#include <esp_sleep.h>
 #include <WiFi.h>
 #include <BLEDevice.h>
 #include <BLEServer.h>
@@ -55,6 +56,17 @@
 #include <BLEUtils.h>
 #include "HWCDC.h"
 #include "Arduino_GFX_Library.h"
+
+// Farbmakros der neueren GFX-Library (>= 1.4.x) heißen RGB565_*.
+// Die kurzen Namen hier bereitstellen, damit der bestehende Code weiterlaeuft.
+#define BLACK   RGB565_BLACK
+#define WHITE   RGB565_WHITE
+#define RED     RGB565_RED
+#define GREEN   RGB565_GREEN
+#define YELLOW  RGB565_YELLOW
+#define CYAN    RGB565_CYAN
+#define MAGENTA RGB565_MAGENTA
+#define ORANGE  RGB565_ORANGE
 
 #define XPOWERS_CHIP_AXP2101
 #include "XPowersLib.h"
@@ -99,6 +111,7 @@ XPowersPMU pmu;
 #define TP_RESET    9
 #define TP_INT      38
 #define BOOT_BTN_PIN 0     // BOOT-Taste (aktiv LOW)
+#define PWR_KEY_PIN  10    // Power-Taste (SYS_OUT, gepuffert; Ruhe LOW, Drücken -> HIGH)
 
 // SD-Karte (microSD, 1-Bit-SDMMC) – für CNN-Modell + Sensor-Aufnahme
 #define SDMMC_CLK   2
@@ -694,6 +707,23 @@ static int weekdayOf(int d, int m, int y) {
 
 static int findPeriod(int day, int h, int m);  // Vorabdeklaration (Definition weiter unten)
 
+// Spannungsbasierte Akku-Prozent (LiPo-Entladekurve). Der AXP2101-Fuel-Gauge
+// ist ohne Kalibrierdaten unzuverlässig; die Batteriespannung ist robuster.
+static int battPctFromVoltage(uint16_t mv) {
+  if (mv <= 0) return -1;
+  if (mv >= 4200) return 100;
+  if (mv <= 3300) return 0;
+  static const uint16_t v[] = {4200, 4100, 3980, 3870, 3780, 3720, 3670, 3620, 3560, 3470, 3380, 3300};
+  static const int    p[] = {100,   92,   82,   72,   60,   50,   40,   30,   20,   12,    5,    0};
+  for (int i = 0; i < 11; i++) {
+    if (mv <= v[i] && mv >= v[i + 1]) {
+      float t = (float)(mv - v[i + 1]) / (v[i] - v[i + 1]);
+      return p[i + 1] + (int)(t * (p[i] - p[i + 1]) + 0.5f);
+    }
+  }
+  return 0;
+}
+
 static void updateEnv() {
   unsigned long now = millis();
   if (now - lastEnvMs < 1000) return;
@@ -706,7 +736,16 @@ static void updateEnv() {
     cachedH = cachedM = cachedS = -1;
     cachedDay = cachedMon = cachedYr = -1;
   }
-  cachedPct = pmu.isBatteryConnect() ? pmu.getBatteryPercent() : -1;
+  // Akku: spannungsbasiert + gleitend gemittelt (keine Sprünge unter Last)
+  static int smoothPct = -1;
+  int pct = battPctFromVoltage(pmu.isBatteryConnect() ? pmu.getBattVoltage() : 0);
+  if (pct >= 0) {
+    if (smoothPct < 0) smoothPct = pct;
+    else smoothPct = (smoothPct * 3 + pct) / 4;
+    cachedPct = smoothPct;
+  } else {
+    cachedPct = -1;
+  }
 
   // Akku-Warnung: einmalig vibrieren, wenn unter 20 %
   if (cachedPct >= 0 && cachedPct < 20 && !battWarned) {
@@ -2392,6 +2431,7 @@ static void btEnable() {
     pAdv->start();
   }
   btOn = true;
+  prefs.putInt("btOn", 1);
   USBSerial.println("BLE aktiviert (Name: Meldezaehler, Zeit/Statistik-Dienst)");
 }
 
@@ -2399,6 +2439,7 @@ static void btDisable() {
   BLEAdvertising *pAdv = BLEDevice::getAdvertising();
   if (pAdv) pAdv->stop();
   btOn = false;
+  prefs.putInt("btOn", 0);
   USBSerial.println("BLE deaktiviert.");
 }
 
@@ -2880,16 +2921,62 @@ static void handleTouch() {
 // ---------------------------------------------------------------------------
 // Physische Tasten (Power + Boot)
 // ---------------------------------------------------------------------------
+// Power-Taste (GPIO10 = SYS_OUT) liest das AXP2101-IRQ-Statusregister ohne
+// volles pmu.begin() – für den schnellen Deep-Sleep-Aufwach-Check.
+static bool peekPowerKeyIrq() {
+  Wire.beginTransmission(PMU_ADDR);
+  Wire.write(0x49);  // AXP2101 INTSTS2
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((int)PMU_ADDR, 1) < 1) return false;
+  uint8_t sts = (uint8_t)Wire.read();
+  return (sts & 0x08) != 0;   // PKEY_SHORT_IRQ = Bit 3 in INTSTS2
+}
+
+// Alles aus -> ESP32 komplett schlafen legen, nur die externe RTC läuft weiter.
+static void enterDeepSleep() {
+  USBSerial.println("[power] Alles aus -> Deep-Sleep (nur RTC laeuft, Power-Taste weckt)");
+  USBSerial.flush();
+  delay(100);
+
+  gfx->displayOff();
+
+  // BLE-Werbung stoppen
+  if (btOn) {
+    BLEAdvertising *pAdv = BLEDevice::getAdvertising();
+    if (pAdv) pAdv->stop();
+    btOn = false;
+    prefs.putInt("btOn", 0);
+  }
+
+  // Power-Taste (GPIO10 = SYS_OUT) weckt sofort; Polarität automatisch erkennen.
+  pinMode(PWR_KEY_PIN, INPUT);
+  delay(20);
+  bool idleHigh = digitalRead(PWR_KEY_PIN);
+  esp_sleep_enable_ext1_wakeup(1ULL << PWR_KEY_PIN,
+                               idleHigh ? ESP_EXT1_WAKEUP_ANY_LOW : ESP_EXT1_WAKEUP_ANY_HIGH);
+
+  // Fallback: alle 3 s kurz aufwachen und Power-Taste per I2C pollen.
+  esp_sleep_enable_timer_wakeup(3000000ULL);
+  esp_deep_sleep_start();   // kehrt nie zurück
+}
+
 static void enterStandby() {
+  // Sensor aus + BLE aus -> nur noch RTC nötig -> ESP32 komplett schlafen legen
+  if (!sensorOn && !btOn && !alarmActive && !streamMode && !sensorRec) {
+    enterDeepSleep();
+    return;
+  }
   standby = true;
   screen = 0;                 // beim Aufwachen auf dem Watchface landen
   touchWasDown = false;
   gfx->setBrightness(0);      // nur Display aus – Sensor/Motor zählen weiter
+  gfx->displayOff();          // Display-Controller in Sleep (spart mehr als nur Helligkeit 0)
   USBSerial.println("[power] Standby (Display aus, Zaehlung laeuft weiter)");
 }
 
 static void wakeFromStandby() {
   standby = false;
+  gfx->displayOn();
   gfx->setBrightness(brightness);
   USBSerial.println("[power] Aufgewacht");
 }
@@ -3444,6 +3531,20 @@ static void handleSerial() {
         } else if (line == "VIB") {
           USBSerial.println("Vibrationstest ...");
           vibrate(300);
+        } else if (line == "BATT") {
+          uint16_t mv = pmu.getBattVoltage();
+          int gauge = pmu.getBatteryPercent();
+          int voltPct = battPctFromVoltage(mv);
+          USBSerial.printf("Akku: %.3fV  gauge=%d%%  spannung=%d%%  %s  %s\n",
+                           mv / 1000.0f, gauge, voltPct,
+                           pmu.isCharging() ? "laedt" : "entlaedt",
+                           pmu.isBatteryConnect() ? "Akku verbunden" : "kein Akku");
+        } else if (line == "BTN") {
+          pinMode(PWR_KEY_PIN, INPUT);
+          USBSerial.printf("Power-Taste (GPIO%d): %s\n", PWR_KEY_PIN,
+                           digitalRead(PWR_KEY_PIN) ? "HIGH (gedrueckt)" : "LOW (losgelassen)");
+        } else if (line == "SLEEP") {
+          enterDeepSleep();
         } else if (line == "SENSOR") {
           USBSerial.printf("Sensor %s\n", sensorOn ? "AN" : "AUS");
         } else if (line == "SENSOR ON") {
@@ -3505,7 +3606,7 @@ static void handleSerial() {
             }
           }
         } else {
-          USBSerial.println("Unbekannt. Befehle: RESET, CAL, CALIB, STATS, VIB, SENSOR, STREAM, STOPSTREAM, RECSD, STOPSD, SDCHECK, TIME HH:MM:SS, DATE DD.MM.YY");
+          USBSerial.println("Unbekannt. Befehle: RESET, CAL, CALIB, STATS, BATT, BTN, SLEEP, VIB, SENSOR, STREAM, STOPSTREAM, RECSD, STOPSD, SDCHECK, TIME HH:MM:SS, DATE DD.MM.YY");
         }
       }
       line = "";

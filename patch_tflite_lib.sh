@@ -40,7 +40,7 @@ done
 # 2) span-Member nicht-const machen
 SPAN="$SRC/third_party/flatbuffers/stl_emulation.h"
 if [ -f "$SPAN" ]; then
-  python3 - "$SPAN" <<'PY'
+  python - "$SPAN" <<'PY'
 import sys
 p = sys.argv[1]
 s = open(p, encoding='utf-8').read()
@@ -57,7 +57,7 @@ fi
 # 3) TF_LITE_REMOVE_VIRTUAL_DELETE deaktivieren
 COMPAT="$SRC/tensorflow/lite/micro/compatibility.h"
 if [ -f "$COMPAT" ]; then
-  python3 - "$COMPAT" <<'PY'
+  python - "$COMPAT" <<'PY'
 import sys, re
 p = sys.argv[1]
 s = open(p, encoding='utf-8').read()

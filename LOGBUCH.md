@@ -308,3 +308,23 @@ vereinfacht; die `!standby`-Sperren am Sensor-Block entfernt.
 
 Touch-Pollen im Standby entfernt. Aufwachen jetzt **nur noch per Power-Taste**
 (weniger Stromverbrauch, weil im Standby kein Touch-Sensor mehr abgefragt wird).
+
+## 01.10.2026 – Echter Deep-Sleep (ESP32 aus, nur RTC) + spannungsbasierte Akku-Anzeige
+
+- **Deep-Sleep:** Wenn Sensor UND BLE aus sind, schaltet die Power-Taste den
+  ESP32 komplett ab (nur die externe RTC läuft weiter, ~µA statt ~mA).
+  - Aufwachen: Power-Taste (GPIO10 = SYS_OUT) sofort per EXT1-Wakeup
+  - 3-s-Timer als Fallback (pollt die Power-Taste über AXP2101-I2C-Interrupt)
+  - `enterDeepSleep()`, `peekPowerKeyIrq()`, Timer-Wakeup-Check in `setup()`
+- **Akku-% spannungsbasiert:** Der AXP2101-Fuel-Gauge ist ohne Kalibrierdaten
+  unzuverlässig → `battPctFromVoltage()` (LiPo-Kurve) + gleitende Glättung.
+- **BLE-Zustand persistent:** `btOn` wird in NVS gespeichert und beim Boot
+  wiederhergestellt (vorher immer an).
+- **Display-Controller-Sleep:** `gfx->displayOff()` (SLPIN) im Standby statt
+  nur Helligkeit 0.
+- **Neue serielle Befehle:** `BATT` (Akku-Diagnose), `BTN` (Power-Taste GPIO10),
+  `SLEEP` (sofort in Deep-Sleep).
+- **Farbmakros:** `BLACK`/`WHITE`/… wieder bereitgestellt (GFX-Library ≥ 1.4
+  heißt `RGB565_*`).
+- **Build:** TensorFlowLite_ESP32 installiert, `patch_tflite_lib.sh` auf
+  `python` umgestellt (Windows), kompiliert + geflasht ✅.

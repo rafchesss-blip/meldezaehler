@@ -1,6 +1,17 @@
 #include "UhrMeldezaehler_core.h"
 
 void setup() {
+  // Deep-Sleep-Timer-Wakeup: nur prüfen, ob die Power-Taste gedrückt wurde.
+  // Wenn nicht, sofort weiterschlafen (spart Strom, nur RTC läuft weiter).
+  esp_sleep_wakeup_cause_t wakeCause = esp_sleep_get_wakeup_cause();
+  if (wakeCause == ESP_SLEEP_WAKEUP_TIMER) {
+    Wire.begin(IIC_SDA, IIC_SCL);
+    if (!peekPowerKeyIrq()) {
+      esp_sleep_enable_timer_wakeup(3000000ULL);
+      esp_deep_sleep_start();   // kehrt nicht zurück
+    }
+  }
+
   USBSerial.begin(115200);
   delay(300);
   USBSerial.println("\n=== MELDEZAEHLER Uhr-App ===");
@@ -142,8 +153,12 @@ void setup() {
   minuteStartMs = millis();
   nextSampleUs = micros();
 
-  // Bluetooth (BLE) automatisch aktivieren, damit die Handy-App die Uhr findet
-  btEnable();
+  // Bluetooth (BLE): gespeicherten Zustand wiederherstellen (Standard: an)
+  if (prefs.getInt("btOn", 1) == 1) {
+    btEnable();
+  } else {
+    btOn = false;
+  }
 
   USBSerial.println("Bereit! Meldebewegung machen.");
 }
