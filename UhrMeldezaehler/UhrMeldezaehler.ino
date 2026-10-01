@@ -1,5 +1,4 @@
 #include "UhrMeldezaehler_core.h"
-#include "lvgl_ui.h"
 
 void setup() {
   // Deep-Sleep-Timer-Wakeup: nur prüfen, ob die Power-Taste gedrückt wurde.
@@ -19,7 +18,7 @@ void setup() {
 
   // Akku sparen: WLAN aus, CPU-Takt senken (BLE/Display/Sensor laufen damit problemlos)
   WiFi.mode(WIFI_OFF);
-  setCpuFrequencyMhz(160);   // Akku sparen – LVGL rendert nur geänderte Bereiche
+  setCpuFrequencyMhz(160);
 
   Wire.begin(IIC_SDA, IIC_SCL);
 
@@ -67,9 +66,6 @@ void setup() {
 
   // Tasten
   pinMode(BOOT_BTN_PIN, INPUT_PULLUP);
-
-  // LVGL-Oberfläche initialisieren (Apps-Menü; Watchface bleibt Canvas)
-  lvglUiInit();
 
   // NVS laden
   prefs.begin("melde", false);
@@ -218,42 +214,24 @@ void loop() {
     minuteStartMs += minuteElapsed * 60000UL;
   }
 
-  // 3) LVGL-Modus umschalten (nur Apps-Menü = LVGL, Rest = Canvas)
-  bool wantLvgl = (screen == 4);
-  if (wantLvgl && !lvglActive) {
-    lvglUiEnter(screen);
-  } else if (!wantLvgl) {
-    lvglActive = false;
+  // 3) Display: Screens mit Live-Daten 5x/s, übrige 1x/s, sofort nach Interaktion
+  static unsigned long lastDrawMs = 0;
+  if (nowMs - lastDrawMs >= redrawIntervalMs() || redrawNow) {
+    lastDrawMs = nowMs;
+    redrawNow = false;
+    updateEnv();
+    if (!standby && !streamMode) renderAndFlush();
   }
 
-  // 4) Environment (1x/s) + Rendering
-  if (lvglActive) {
-    // LVGL: nur geänderte Bereiche neu zeichnen -> Touch bleibt flüssig
-    static unsigned long lastLvglEnvMs = 0;
-    if (nowMs - lastLvglEnvMs >= 1000) {
-      lastLvglEnvMs = nowMs;
-      updateEnv();
-    }
-    if (!standby && !streamMode) lv_timer_handler();
-  } else {
-    // Canvas: 1x pro Sekunde + sofort nach Interaktion
-    static unsigned long lastDrawMs = 0;
-    if (nowMs - lastDrawMs >= 1000 || redrawNow) {
-      lastDrawMs = nowMs;
-      redrawNow = false;
-      updateEnv();
-      if (!standby && !streamMode) renderAndFlush();
-    }
+  // 4) Touch @ ~30 Hz (im Standby kein Touch-Pollen – Aufwachen nur per Power)
+  static unsigned long lastTouchMs = 0;
+  if (nowMs - lastTouchMs >= 30) {
+    lastTouchMs = nowMs;
+    if (!standby && !streamMode) handleTouch();
   }
 
-  // 5) Touch @ ~30 Hz (nur Canvas-Modus; LVGL bekommt Touch intern)
-  if (!lvglActive) {
-    static unsigned long lastTouchMs = 0;
-    if (nowMs - lastTouchMs >= 30) {
-      lastTouchMs = nowMs;
-      if (!standby && !streamMode) handleTouch();
-    }
-  }
+  // 4b) BLE-Befehle aus der App abarbeiten (im Bluetooth-Task nur eingereiht)
+  processBleCommands();
 
   // 5) Tasten (Power + Boot)
   handleButtons();
@@ -263,6 +241,9 @@ void loop() {
 
   // 6b) Wecker-Vibrationsmuster (läuft, bis der Alarm gestoppt wird)
   updateAlarm();
+
+  // 6c) Vibrations-Pulse von vibrate() abschalten/fortsetzen
+  updateVibration();
 
   // 7) Serielle Befehle
   handleSerial();
