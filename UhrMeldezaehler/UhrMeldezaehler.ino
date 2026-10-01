@@ -1,4 +1,5 @@
 #include "UhrMeldezaehler_core.h"
+#include "lvgl_ui.h"
 
 void setup() {
   // Deep-Sleep-Timer-Wakeup: nur prüfen, ob die Power-Taste gedrückt wurde.
@@ -66,6 +67,10 @@ void setup() {
 
   // Tasten
   pinMode(BOOT_BTN_PIN, INPUT_PULLUP);
+
+  // LVGL-Oberfläche (Watchface + Apps) initialisieren
+  lvglUiInit();
+  lvglUiEnter(0);
 
   // NVS laden
   prefs.begin("melde", false);
@@ -214,21 +219,42 @@ void loop() {
     minuteStartMs += minuteElapsed * 60000UL;
   }
 
-  // 3) Display: 1x pro Sekunde (Uhr tickt 1x/s) + sofort nach Interaktion.
-  //    Kein Dauer-Rendern mehr -> Touch/Tasten reagieren ohne Delay.
-  static unsigned long lastDrawMs = 0;
-  if (nowMs - lastDrawMs >= 1000 || redrawNow) {
-    lastDrawMs = nowMs;
-    redrawNow = false;
-    updateEnv();
-    if (!standby && !streamMode) renderAndFlush();
+  // 3) LVGL-Modus umschalten (Screens 0/4 = LVGL, Rest = Canvas)
+  bool wantLvgl = (screen == 0 || screen == 4);
+  if (wantLvgl && !lvglActive) {
+    lvglUiEnter(screen);
+  } else if (!wantLvgl) {
+    lvglActive = false;
   }
 
-  // 4) Touch @ ~30 Hz (im Standby kein Touch-Pollen – Aufwachen nur per Power)
-  static unsigned long lastTouchMs = 0;
-  if (nowMs - lastTouchMs >= 30) {
-    lastTouchMs = nowMs;
-    if (!standby && !streamMode) handleTouch();
+  // 4) Environment (1x/s) + Rendering
+  if (lvglActive) {
+    // LVGL: nur geänderte Bereiche neu zeichnen -> Touch bleibt flüssig
+    static unsigned long lastLvglEnvMs = 0;
+    if (nowMs - lastLvglEnvMs >= 1000) {
+      lastLvglEnvMs = nowMs;
+      updateEnv();
+      lvglUiUpdateLabels();
+    }
+    if (!standby && !streamMode) lv_timer_handler();
+  } else {
+    // Canvas: 1x pro Sekunde + sofort nach Interaktion
+    static unsigned long lastDrawMs = 0;
+    if (nowMs - lastDrawMs >= 1000 || redrawNow) {
+      lastDrawMs = nowMs;
+      redrawNow = false;
+      updateEnv();
+      if (!standby && !streamMode) renderAndFlush();
+    }
+  }
+
+  // 5) Touch @ ~30 Hz (nur Canvas-Modus; LVGL bekommt Touch intern)
+  if (!lvglActive) {
+    static unsigned long lastTouchMs = 0;
+    if (nowMs - lastTouchMs >= 30) {
+      lastTouchMs = nowMs;
+      if (!standby && !streamMode) handleTouch();
+    }
   }
 
   // 5) Tasten (Power + Boot)
