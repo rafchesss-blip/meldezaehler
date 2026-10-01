@@ -371,15 +371,55 @@ static void updateAlarm() {
   }
 }
 
-static void vibrate(unsigned long ms = 120) {
+// Vibration ohne delay(): vibrate() schaltet den Motor nur ein, updateVibration()
+// in loop() schaltet ihn ab bzw. setzt weitere Pulse fort. Vorher blockierte
+// jede Meldung loop() für 120 ms – in der Zeit gingen Touch-Gesten verloren.
+static bool vibPhaseOn = false;
+static int vibPulsesLeft = 0;            // Pulse nach dem laufenden
+static unsigned long vibOnMs = 0, vibGapMs = 0, vibNextMs = 0;
+
+static void vibrate(unsigned long ms = 120, int pulses = 1, unsigned long gapMs = 100) {
   if (alarmActive) return;   // Wecker-Muster hat Vorrang
   if (!vibrationAllowed()) {
     USBSerial.printf("[vib] Vibration unterdrueckt\n");
     return;
   }
+  vibOnMs = ms;
+  vibGapMs = gapMs;
+  vibPulsesLeft = pulses - 1;
+  vibPhaseOn = true;
+  vibNextMs = millis() + ms;
   motorWrite(true);
+}
+
+static void updateVibration() {
+  if (!vibPhaseOn && vibPulsesLeft <= 0) return;
+  if (alarmActive) {         // Wecker hat den Motor übernommen
+    vibPhaseOn = false;
+    vibPulsesLeft = 0;
+    return;
+  }
+  unsigned long now = millis();
+  if ((long)(now - vibNextMs) < 0) return;
+  if (vibPhaseOn) {
+    motorWrite(false);
+    vibPhaseOn = false;
+    vibNextMs = now + vibGapMs;
+  } else {
+    vibPulsesLeft--;
+    vibPhaseOn = true;
+    motorWrite(true);
+    vibNextMs = now + vibOnMs;
+  }
+}
+
+// Für modale Abläufe (Kalibrierung, TISCH-Messung), die loop() nicht
+// durchlaufen: dort muss der Motor vor dem Weitermachen wieder aus sein.
+static void vibrateBlocking(unsigned long ms) {
+  vibrate(ms);
+  if (!vibPhaseOn) return;   // unterdrückt (Motor aus / Stumm / Wecker)
   delay(ms);
-  motorWrite(false);
+  updateVibration();
 }
 
 // ---------------------------------------------------------------------------
@@ -752,9 +792,7 @@ static void updateEnv() {
   // Akku-Warnung: einmalig vibrieren, wenn unter 20 %
   if (cachedPct >= 0 && cachedPct < 20 && !battWarned) {
     battWarned = true;
-    vibrate(150);
-    delay(120);
-    vibrate(150);
+    vibrate(150, 2, 120);
     USBSerial.printf("[akku] WARNUNG: nur noch %d%%\n", cachedPct);
   }
   if (cachedPct >= 25) battWarned = false;
@@ -1491,11 +1529,11 @@ static Vec3 collectArmUnten() {
   for (int i = 1; i <= CAL_REPS; i++) {
     snprintf(rep, sizeof(rep), "Wiederholung %d/%d", i, CAL_REPS);
     calibScreen("Arm UNTEN halten", rep, 0);
-    vibrate(VIB_REP_MS);
+    vibrateBlocking(VIB_REP_MS);
     Vec3 v = collectStaticRep(1500);
     Nsum = {Nsum.x + v.x, Nsum.y + v.y, Nsum.z + v.z};
   }
-  vibrate(VIB_SCHRITT_MS);
+  vibrateBlocking(VIB_SCHRITT_MS);
   return vnorm(Nsum);
 }
 
@@ -1506,11 +1544,11 @@ static Vec3 collectArmHoch() {
   for (int i = 1; i <= CAL_REPS; i++) {
     snprintf(rep, sizeof(rep), "Wiederholung %d/%d", i, CAL_REPS);
     calibScreen("Arm HOCH halten", rep, 0);
-    vibrate(VIB_REP_MS);
+    vibrateBlocking(VIB_REP_MS);
     Vec3 v = collectStaticRep(1500);
     Hsum = {Hsum.x + v.x, Hsum.y + v.y, Hsum.z + v.z};
   }
-  vibrate(VIB_SCHRITT_MS);
+  vibrateBlocking(VIB_SCHRITT_MS);
   return vnorm(Hsum);
 }
 
@@ -1521,11 +1559,11 @@ static float collectNichtMelden() {
   for (int i = 1; i <= CAL_REPS; i++) {
     snprintf(rep, sizeof(rep), "Wiederholung %d/%d", i, CAL_REPS);
     calibScreen("NICHT MELDEN", rep, 0);
-    vibrate(VIB_REP_MS);
+    vibrateBlocking(VIB_REP_MS);
     float s = collectNormalRep(1500);
     if (s > maxScore) maxScore = s;
   }
-  vibrate(VIB_SCHRITT_MS);
+  vibrateBlocking(VIB_SCHRITT_MS);
   return maxScore;
 }
 
@@ -1536,11 +1574,11 @@ static Vec3 collectTisch() {
   for (int i = 1; i <= CAL_REPS; i++) {
     snprintf(rep, sizeof(rep), "Wiederholung %d/%d", i, CAL_REPS);
     calibScreen("TISCH halten", rep, 0);
-    vibrate(VIB_REP_MS);
+    vibrateBlocking(VIB_REP_MS);
     Vec3 v = collectStaticRep(1500);
     Tsum = {Tsum.x + v.x, Tsum.y + v.y, Tsum.z + v.z};
   }
-  vibrate(VIB_SCHRITT_MS);
+  vibrateBlocking(VIB_SCHRITT_MS);
   return vnorm(Tsum);
 }
 
@@ -2386,34 +2424,75 @@ static void drawMotor() {
 #define BLE_CHAR_TT_UUID     "beb5483e-36e1-4688-b7f5-ea07361b26ab"
 #define BLE_CHAR_LESSON_UUID "beb5483e-36e1-4688-b7f5-ea07361b26ac"
 
+// onWrite() läuft im Bluetooth-Task, nicht in loop(). I2C (RTC, PMU, Touch,
+// IMU), NVS und die Stundenplan-Arrays sind nicht für gleichzeitigen Zugriff
+// aus zwei Tasks ausgelegt – verschränkte I2C-Transaktionen machen u. a. den
+// Touch unzuverlässig. Deshalb reiht onWrite() nur ein, loop() führt aus
+// (processBleCommands).
+enum BleCmdKind : uint8_t { BLE_CMD_TIME, BLE_CMD_CLEAR, BLE_CMD_TT };
+struct BleCmd {
+  BleCmdKind kind;
+  uint8_t len;
+  char data[64];             // Stundenplan-Befehl max. ~40 Zeichen, Zeit 6 Bytes
+};
+static QueueHandle_t bleCmdQueue = nullptr;
+static volatile uint32_t bleCmdDropped = 0;
+
 class MeldeBleCallbacks : public BLECharacteristicCallbacks {
   void onWrite(BLECharacteristic *pChar) override {
-    if (pChar == pCharTime) {
-      String v = pChar->getValue();
-      if (v.length() >= 6) {
-        RTC_Time t;
-        rtcRead(t);
-        t.yr = (uint8_t)v[0];
-        t.mon = (uint8_t)v[1];
-        t.day = (uint8_t)v[2];
-        t.h = (uint8_t)v[3];
-        t.m = (uint8_t)v[4];
-        t.s = (uint8_t)v[5];
-        rtcWrite(t);
-        updateEnv();
-        USBSerial.println("Zeit/Datum per BLE gesetzt");
-      }
-    } else if (pChar == pCharClear) {
-      resetAllStats();
-      USBSerial.println("Statistik per BLE geloescht");
-    } else if (pChar == pCharTT) {
-      handleTTCommand(pChar->getValue());
+    BleCmd c;
+    if (pChar == pCharTime) c.kind = BLE_CMD_TIME;
+    else if (pChar == pCharClear) c.kind = BLE_CMD_CLEAR;
+    else if (pChar == pCharTT) c.kind = BLE_CMD_TT;
+    else return;
+    String v = pChar->getValue();
+    c.len = (uint8_t)min((size_t)v.length(), sizeof(c.data) - 1);
+    memcpy(c.data, v.c_str(), c.len);
+    c.data[c.len] = 0;
+    // Kurz warten statt verwerfen: die App schreibt den Stundenplan Befehl für Befehl
+    if (!bleCmdQueue || xQueueSend(bleCmdQueue, &c, pdMS_TO_TICKS(100)) != pdTRUE) {
+      bleCmdDropped++;
     }
   }
 };
 
+static void processBleCommands() {
+  if (bleCmdDropped) {
+    USBSerial.printf("[ble] %lu Befehl(e) verworfen (Warteschlange voll)\n",
+                     (unsigned long)bleCmdDropped);
+    bleCmdDropped = 0;
+  }
+  if (!bleCmdQueue) return;
+  BleCmd c;
+  while (xQueueReceive(bleCmdQueue, &c, 0) == pdTRUE) {
+    if (c.kind == BLE_CMD_TIME) {
+      if (c.len >= 6) {
+        RTC_Time t;
+        rtcRead(t);
+        t.yr = (uint8_t)c.data[0];
+        t.mon = (uint8_t)c.data[1];
+        t.day = (uint8_t)c.data[2];
+        t.h = (uint8_t)c.data[3];
+        t.m = (uint8_t)c.data[4];
+        t.s = (uint8_t)c.data[5];
+        rtcWrite(t);
+        lastEnvMs = 0;       // Drosselung umgehen -> neue Zeit sofort übernehmen
+        updateEnv();
+        USBSerial.println("Zeit/Datum per BLE gesetzt");
+      }
+    } else if (c.kind == BLE_CMD_CLEAR) {
+      resetAllStats();
+      USBSerial.println("Statistik per BLE geloescht");
+    } else {
+      handleTTCommand(String(c.data));
+    }
+    redrawNow = true;
+  }
+}
+
 static void btEnable() {
   if (!bleInited) {
+    if (!bleCmdQueue) bleCmdQueue = xQueueCreate(32, sizeof(BleCmd));
     BLEDevice::init("Meldezaehler");
     pServer = BLEDevice::createServer();
     BLEService *pService = pServer->createService(BLE_SERVICE_UUID);
@@ -2782,6 +2861,16 @@ static void drawMeldeEdit() {
   }
 }
 
+// Neuzeichnen-Takt pro Screen. Screens mit Live-Daten (Arm-Zustand/Modell im
+// Melde-Screen, Timer, Test-App, Sensor-Aufnahme) brauchen 5 Hz, sonst wirken
+// sie eingefroren; alle übrigen 1 Hz (Sekundenanzeige) + sofort bei redrawNow.
+static unsigned long redrawIntervalMs() {
+  switch (screen) {
+    case 1: case 7: case 8: case 9: return 200;
+    default: return 1000;
+  }
+}
+
 static void renderAndFlush() {
   canvas->fillScreen(BLACK);
   if (screen == 0) {
@@ -3059,7 +3148,7 @@ static void bootDoublePress() {
   USBSerial.println("[boot] Doppel-Klick -> TISCH neu kalibrieren");
   if (!calibrated) {
     USBSerial.println("[tisch] Noch nicht kalibriert - TISCH-Update ignoriert.");
-    vibrate(120); delay(100); vibrate(120);
+    vibrate(120, 2, 100);
     return;
   }
   if (standby) wakeFromStandby();
@@ -3069,7 +3158,7 @@ static void bootDoublePress() {
   centerText(250, "Uhr liegt auf dem Tisch ...", CYAN, 2);
   canvas->flush();
 
-  vibrate(100);
+  vibrateBlocking(100);
   delay(500);                        // kurz ruhen lassen
   T_dir = collectStaticRep(2000);    // 2 s ruhig messen
   tischCalibrated = true;
@@ -3088,7 +3177,7 @@ static void bootDoublePress() {
   bufHead = 0;
   bufCount = 0;
 
-  vibrate(VIB_SCHRITT_MS);           // längere Bestätigung
+  vibrateBlocking(VIB_SCHRITT_MS);   // längere Bestätigung
 
   canvas->fillScreen(BLACK);
   centerText(230, "TISCH gespeichert!", GREEN, 3);

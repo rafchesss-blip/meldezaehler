@@ -350,3 +350,20 @@ Layout ersetzt und damit alle 6 Zifferblätter unerreichbar gemacht. Korrigiert:
   Bild stehen zu lassen (das war der „beim Rausgehen wird nur die alte App
   angezeigt"-Fehler).
 - Kompiliert ✅ (Flash 59 %, RAM 60 %).
+
+## 01.10.2026 – Branch `fix/ui-reaktion`: LVGL entfernt, Touch-Blockaden beseitigt
+
+Auftrag: „mach schritte 1-3 auf eigenem branch, touch ist sehr zäe, reagiert
+sporadisch". Ungetestet auf der Uhr – nur kompiliert (Flash 50 %, RAM 41 %).
+
+- **LVGL entfernt** (`lvgl_ui.h`): deckte nur das Apps-Menü ab, brachte einen
+  zweiten Renderer und eine zweite Touch-Verarbeitung auf demselben Display.
+  Apps-Menü wieder Canvas (`drawAppTray`/`appTrayTap`).
+- **Neuzeichnen pro Screen** (`redrawIntervalMs()`): Live-Screens (Melde,
+  Zeit, Test, Sensor-Aufnahme) 5 Hz, übrige 1 Hz, sofort bei `redrawNow`.
+- **BLE-Schreibbefehle in `loop()`** (`processBleCommands()`): `onWrite()` lief
+  im Bluetooth-Task parallel zu `loop()` und griff auf I2C/NVS/Stundenplan zu.
+- **`vibrate()` ohne `delay()`** (`updateVibration()` in `loop()`); modale
+  Abläufe (Kalibrierung, TISCH-Messung) nutzen `vibrateBlocking()`.
+- Unverändert und weiter zu prüfen: QSPI 80 MHz, Dauer von `Invoke()`
+  (`[perf] CNN avg`), blockierende Kalibrier-/WLAN-Abläufe.
