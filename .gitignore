@@ -1,7 +1,3 @@
 __pycache__/
 *.pyc
-*.joblib
-
-# Build-Artefakte / grosse Binaries
-*.apk
 *.bin
