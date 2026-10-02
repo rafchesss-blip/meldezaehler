@@ -1,4 +1,6 @@
 #include "UhrMeldezaehler_core.h"
+#include "ui_ctl.h"
+#include "ui.h"
 
 void setup() {
   // Deep-Sleep-Timer-Wakeup: nur prüfen, ob die Power-Taste gedrückt wurde.
@@ -41,28 +43,21 @@ void setup() {
   USBSerial.printf("PMU AXP2101: %s\n", pmuOk ? "OK" : "FEHLER");
   Wire.setClock(400000);
 
-  // Display
-  if (!canvas->begin(80000000)) {   // QSPI 80 MHz statt 40 MHz – halbiert die Flush-Zeit (flüssigeres UI)
+  // Display (LVGL) + Touch
+  if (!halDisplayInit()) {
     USBSerial.println("Display init fehlgeschlagen!");
   }
-  canvas->fillScreen(BLACK);
-  canvas->flush();
+  touchInit();
+  uiInit();
 
   // IMU
   bool imuOk = qmiInit();
   USBSerial.printf("QMI8658: %s\n", imuOk ? "OK" : "FEHLER");
   if (!imuOk) {
-    canvas->fillScreen(BLACK);
-    canvas->setTextSize(2);
-    canvas->setTextColor(RED);
-    canvas->setCursor(60, 220);
-    canvas->print("QMI8658 nicht gefunden!");
-    canvas->flush();
+    halSetBrightness(200);
+    uiFatal("Sensorfehler", "Bewegungssensor QMI8658 nicht gefunden.");
     while (1) delay(1000);
   }
-
-  // Touch
-  touchInit();
 
   // Tasten
   pinMode(BOOT_BTN_PIN, INPUT_PULLUP);
@@ -77,7 +72,7 @@ void setup() {
   motorOn = prefs.getInt("motorOn", 1) == 1;
   muteInLessons = prefs.getInt("muteLessons", 0) == 1;
   lastSession = prefs.getInt("lastSession", 0);
-  gfx->setBrightness(brightness);
+  halSetBrightness(brightness);
 
   // Stundenplan + Stunden-Statistik aus NVS laden
   loadTimetable();
@@ -108,17 +103,7 @@ void setup() {
     USBSerial.printf("Kalibrierung aus NVS geladen. enterHoch=%.3f\n", enterHoch);
   } else {
     // Erst-Kalibrierung: erst tragen lassen, dann auf Tipp warten
-    canvas->fillScreen(BLACK);
-    canvas->setTextSize(2);
-    canvas->setTextColor(WHITE);
-    canvas->setCursor(70, 200);
-    canvas->print("Uhr anlegen, dann");
-    canvas->setCursor(70, 240);
-    canvas->print("auf das Display tippen");
-    canvas->setTextColor(YELLOW);
-    canvas->setCursor(90, 300);
-    canvas->print("(Kalibrierung startet)");
-    canvas->flush();
+    uiFirstBoot();
     USBSerial.println("Warte auf Tipp zum Kalibrieren (oder Befehl CAL) ...");
     waitForTap();
     runCalibration();
@@ -214,20 +199,15 @@ void loop() {
     minuteStartMs += minuteElapsed * 60000UL;
   }
 
-  // 3) Display: Screens mit Live-Daten 5x/s, übrige 1x/s, sofort nach Interaktion
-  static unsigned long lastDrawMs = 0;
-  if (nowMs - lastDrawMs >= redrawIntervalMs() || redrawNow) {
-    lastDrawMs = nowMs;
-    redrawNow = false;
-    updateEnv();
-    if (!standby && !streamMode) renderAndFlush();
-  }
+  // 3) Uhrzeit, Akku, Stunde, BLE-Werte
+  updateEnv();
 
-  // 4) Touch @ ~30 Hz (im Standby kein Touch-Pollen – Aufwachen nur per Power)
-  static unsigned long lastTouchMs = 0;
-  if (nowMs - lastTouchMs >= 30) {
-    lastTouchMs = nowMs;
-    if (!standby && !streamMode) handleTouch();
+  // 4) Oberfläche: Navigation + LVGL (Touch lesen, geänderte Flächen zeichnen).
+  //    Im Standby/Streaming ruht die Oberfläche; Touch wird dann nicht gelesen.
+  ctlProcessPending();
+  if (!standby && !streamMode) {
+    uiSync();
+    lv_timer_handler();
   }
 
   // 4b) BLE-Befehle aus der App abarbeiten (im Bluetooth-Task nur eingereiht)

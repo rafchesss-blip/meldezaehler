@@ -55,19 +55,6 @@
 #include <BLECharacteristic.h>
 #include <BLEUtils.h>
 #include "HWCDC.h"
-#include "Arduino_GFX_Library.h"
-
-// Farbmakros der neueren GFX-Library (>= 1.4.x) heißen RGB565_*.
-// Die kurzen Namen hier bereitstellen, damit der bestehende Code weiterlaeuft.
-#define BLACK   RGB565_BLACK
-#define WHITE   RGB565_WHITE
-#define RED     RGB565_RED
-#define GREEN   RGB565_GREEN
-#define YELLOW  RGB565_YELLOW
-#define CYAN    RGB565_CYAN
-#define MAGENTA RGB565_MAGENTA
-#define ORANGE  RGB565_ORANGE
-
 #define XPOWERS_CHIP_AXP2101
 #include "XPowersLib.h"
 
@@ -137,17 +124,7 @@ static bool ensureSd() {
 #define TOUCH_ADDR  0x38
 #define PMU_ADDR    0x34
 
-// ---------------------------------------------------------------------------
-// Display-Objekte
-// ---------------------------------------------------------------------------
-Arduino_DataBus *bus = new Arduino_ESP32QSPI(
-    LCD_CS, LCD_SCLK, LCD_SDIO0, LCD_SDIO1, LCD_SDIO2, LCD_SDIO3);
-
-Arduino_CO5300 *gfx = new Arduino_CO5300(bus, LCD_RESET, 0 /* rotation */,
-                                         LCD_WIDTH, LCD_HEIGHT,
-                                         22 /* col_offset1 */, 0, 0, 0);
-
-Arduino_Canvas *canvas = new Arduino_Canvas(LCD_WIDTH, LCD_HEIGHT, gfx);
+#include "hal_display.h"
 
 // ---------------------------------------------------------------------------
 // QMI8658 Treiber (minimal, direkt über Wire)
@@ -283,15 +260,17 @@ static void touchInit() {
   Wire.endTransmission();
 }
 
+// Ein I2C-Burst über Reg 0x02..0x06 (Anzahl, X, Y) statt fünf Einzelzugriffen
 static bool touchRead(uint16_t &x, uint16_t &y) {
-  uint8_t n = touchReg(0x02);
-  if (n == 0 || n > 2) return false;
-  uint8_t xh = touchReg(0x03) & 0x0F;
-  uint8_t xl = touchReg(0x04);
-  uint8_t yh = touchReg(0x05) & 0x0F;
-  uint8_t yl = touchReg(0x06);
-  x = (xh << 8) | xl;
-  y = (yh << 8) | yl;
+  Wire.beginTransmission(TOUCH_ADDR);
+  Wire.write(0x02);
+  if (Wire.endTransmission(false) != 0) return false;
+  if (Wire.requestFrom((int)TOUCH_ADDR, 5) < 5) return false;
+  uint8_t b[5];
+  for (int i = 0; i < 5; i++) b[i] = (uint8_t)Wire.read();
+  if (b[0] == 0 || b[0] > 2) return false;
+  x = ((b[1] & 0x0F) << 8) | b[2];
+  y = ((b[3] & 0x0F) << 8) | b[4];
   return true;
 }
 
@@ -603,38 +582,22 @@ static MeldLogEntry meldLog[MAX_MELD_LOG];
 static int meldLogWrite = 0;
 static int meldLogCount = 0;
 
-// UI
-int view = 0;                  // 0 = Zähler, 1 = Statistik
+// Oberfläche (Navigation; Masken in ui*.h)
+int view = 0;                  // Melden-Seite: 0 = Zähler, 1 = Statistik, 2 = Kalibrierung
 int watchface = 0;             // aktuelles Watchface (0..5)
-int watchfaceSel = 0;          // Auswahl im Zifferblatt-Picker
-bool touchWasDown = false;
-bool touchHoldFired = false;   // Watchface-Halten wurde bereits ausgeloest
-unsigned long touchDownMs = 0;
-uint16_t touchX = 0, touchY = 0;
-uint16_t touchStartX = 0, touchStartY = 0;
-bool showResetHint = false;
-unsigned long resetHintMs = 0;
-
-// Test-App
-char testInfo[40] = "";
-unsigned long testInfoMs = 0;
 
 // Standby + Tasten
 #define BOOT_DOUBLE_MS 800   // Zeitfenster (ms) für Doppel-Klick auf BOOT
 bool standby = false;
 bool bootBtnWasDown = false;
 unsigned long bootDownMs = 0;
-// Sofort-Neuzeichnen nach Touch/Taste/Meldung (sonst nur 1x/s)
-bool redrawNow = false;
 // Doppel-Klick-Erkennung (zwei schnelle BOOT-Drücke)
 bool bootDoublePending = false;
 unsigned long bootFirstPressMs = 0;
 
 // App-Struktur (Launcher)
-int screen = 0;                // 0 = Watchface, 1 = Meldezähler, 2 = Einstellungen, 3 = Zifferblatt, 4 = Apps, 6 = Melde-Bearbeiten, 7 = Zeit, 8 = Test, 9 = Sensor-Aufnahme
-int settingsItem = 0;          // 0 = Menü, 1 = Helligkeit, 2 = WLAN, 3 = Bluetooth
+int screen = 0;                // 0 = Watchface, 1 = Melden, 2 = Einstellungen, 3 = Zifferblatt, 4 = Apps, 6 = Meldungen bearbeiten, 7 = Zeit, 8 = Test, 9 = Sensor-Aufnahme
 int meldeEditMode = 0;         // 0 = Menü (Löschen/Hinzufügen/Bearbeiten), 1 = Bearbeiten, 2 = Richtig/Falsch
-bool calibSelectOpen = false;  // Auswahl "Was kalibrieren?" im Kalibrier-Screen
 
 // Zeit-App (Timer + Stoppuhr)
 int zeitTab = 0;               // 0 = Timer, 1 = Stoppuhr, 2 = Alarm
@@ -647,13 +610,6 @@ unsigned long stopwatchStartMs = 0;
 bool stopwatchRunning = false;
 int brightness = 208;          // 0..255 (CO5300 Normal-Mode-Helligkeit)
 
-// WLAN
-String wifiPass = "";
-int wifiOffset = 0;            // Scroll-Offset der Netzliste
-int wifiPasswordMode = 0;      // 0 = aus, 1 = Passworteingabe
-String wifiTargetSSID = "";
-int wifiCursor = 0;
-
 // Bluetooth (BLE)
 static bool bleInited = false;
 bool btOn = false;
@@ -664,7 +620,10 @@ bool sensorOn = true;
 // Umgebungsdaten (1 Hz aktualisiert, damit das Rendern flüssig bleibt)
 static int cachedH = -1, cachedM = -1, cachedS = -1;
 static int cachedDay = -1, cachedMon = -1, cachedYr = -1, cachedPct = -1;
+static int battMV = 0;            // Akkuspannung in mV (für Test-Maske)
+static bool battCharging = false;
 static unsigned long lastEnvMs = 0;
+static unsigned long lastRtcMs = 0;
 
 // Akku-Warnung + Stunden-Auto-Reset
 static bool battWarned = false;
@@ -766,21 +725,30 @@ static int battPctFromVoltage(uint16_t mv) {
   return 0;
 }
 
+// In jedem loop()-Durchlauf aufrufen. Die Uhrzeit wird alle 200 ms gelesen –
+// bei nur 1x/s würde die Sekundenanzeige durch Phasenversatz gelegentlich
+// springen. Akku, Stunde und BLE-Werte reichen 1x/s.
 static void updateEnv() {
   unsigned long now = millis();
+  if (now - lastRtcMs >= 200) {
+    lastRtcMs = now;
+    RTC_Time t;
+    if (rtcRead(t)) {
+      cachedH = t.h; cachedM = t.m; cachedS = t.s;
+      cachedDay = t.day; cachedMon = t.mon; cachedYr = t.yr;
+    } else {
+      cachedH = cachedM = cachedS = -1;
+      cachedDay = cachedMon = cachedYr = -1;
+    }
+  }
   if (now - lastEnvMs < 1000) return;
   lastEnvMs = now;
-  RTC_Time t;
-  if (rtcRead(t)) {
-    cachedH = t.h; cachedM = t.m; cachedS = t.s;
-    cachedDay = t.day; cachedMon = t.mon; cachedYr = t.yr;
-  } else {
-    cachedH = cachedM = cachedS = -1;
-    cachedDay = cachedMon = cachedYr = -1;
-  }
   // Akku: spannungsbasiert + gleitend gemittelt (keine Sprünge unter Last)
   static int smoothPct = -1;
-  int pct = battPctFromVoltage(pmu.isBatteryConnect() ? pmu.getBattVoltage() : 0);
+  bool battOk = pmu.isBatteryConnect();
+  battMV = battOk ? pmu.getBattVoltage() : 0;
+  battCharging = battOk && pmu.isCharging();
+  int pct = battPctFromVoltage(battMV);
   if (pct >= 0) {
     if (smoothPct < 0) smoothPct = pct;
     else smoothPct = (smoothPct * 3 + pct) / 4;
@@ -952,7 +920,6 @@ static void registerMeldung(unsigned long dauerMs = 0) {
   minuteCount++;
   meldungenSeitCalib++;
   meldeZeitMs += dauerMs;
-  redrawNow = true;   // Zähler sofort aktualisieren
 
   int wd = -1, p = -1;
   if (ttActive && cachedDay >= 1 && cachedMon >= 1) {
@@ -1439,7 +1406,11 @@ static void evaluate() {
 // ---------------------------------------------------------------------------
 // Kalibrierung (10 Wiederholungen x 3 Haltungen)
 // ---------------------------------------------------------------------------
-static void centerText(int y, const char *s, uint16_t color, int scale);
+// Anzeige der Kalibrier-Schritte (ui.h); hier nur vorab deklariert
+static void uiCalibShow(const char *title, const char *sub, int countdown, int rep, int reps);
+static void uiMessage(const char *icon, lv_color_t c, const char *title, const char *sub);
+static void uiInvalidateAll();
+static void powerBack();
 
 // Eine ruhige Haltung messen -> mittlere "oben"-Richtung (Einheitsvektor)
 static Vec3 collectStaticRep(unsigned long dauerMs) {
@@ -1496,90 +1467,56 @@ static float computeEnterHoch() {
   return e;
 }
 
-static void calibScreen(const char *title, const char *sub, int big) {
-  canvas->fillScreen(BLACK);
-  canvas->setTextSize(2);
-  canvas->setTextColor(WHITE);
-  canvas->setCursor(80, 150);
-  canvas->print("Kalibrierung");
-  centerText(225, title, YELLOW, 3);
-  if (sub) centerText(295, sub, CYAN, 2);
-  if (big > 0) {
-    char buf[8];
-    snprintf(buf, sizeof(buf), "%d", big);
-    canvas->setTextSize(6);
-    canvas->setTextColor(CYAN);
-    int w = strlen(buf) * 6 * 6;
-    canvas->setCursor(LCD_WIDTH / 2 - w / 2, 340);
-    canvas->print(buf);
+// Ein Kalibrier-Schritt: 3-s-Countdown, dann CAL_REPS Wiederholungen mit
+// Vibration als Startsignal; measure() misst eine Wiederholung.
+template <typename F>
+static void calibSteps(const char *title, const char *sub, F measure) {
+  for (int i = 3; i >= 1; i--) {
+    uiCalibShow(title, sub, i, 0, 0);
+    delay(1000);
   }
-  canvas->flush();
-}
-
-static void calibRep(const char *title, int rep) {
-  char buf[32];
-  snprintf(buf, sizeof(buf), "Wiederholung %d/%d", rep, CAL_REPS);
-  calibScreen(title, buf, 0);
+  for (int i = 1; i <= CAL_REPS; i++) {
+    uiCalibShow(title, sub, 0, i, CAL_REPS);
+    vibrateBlocking(VIB_REP_MS);
+    measure();
+  }
+  vibrateBlocking(VIB_SCHRITT_MS);
 }
 
 static Vec3 collectArmUnten() {
-  char rep[32];
-  for (int i = 3; i >= 1; i--) { calibScreen("Arm UNTEN halten", "ruhig", i); delay(1000); }
-  Vec3 Nsum = {0, 0, 0};
-  for (int i = 1; i <= CAL_REPS; i++) {
-    snprintf(rep, sizeof(rep), "Wiederholung %d/%d", i, CAL_REPS);
-    calibScreen("Arm UNTEN halten", rep, 0);
-    vibrateBlocking(VIB_REP_MS);
+  Vec3 sum = {0, 0, 0};
+  calibSteps("Arm unten", "Arm locker hängen lassen", [&]() {
     Vec3 v = collectStaticRep(1500);
-    Nsum = {Nsum.x + v.x, Nsum.y + v.y, Nsum.z + v.z};
-  }
-  vibrateBlocking(VIB_SCHRITT_MS);
-  return vnorm(Nsum);
+    sum = {sum.x + v.x, sum.y + v.y, sum.z + v.z};
+  });
+  return vnorm(sum);
 }
 
 static Vec3 collectArmHoch() {
-  char rep[32];
-  for (int i = 3; i >= 1; i--) { calibScreen("Arm HOCH halten", "ruhig", i); delay(1000); }
-  Vec3 Hsum = {0, 0, 0};
-  for (int i = 1; i <= CAL_REPS; i++) {
-    snprintf(rep, sizeof(rep), "Wiederholung %d/%d", i, CAL_REPS);
-    calibScreen("Arm HOCH halten", rep, 0);
-    vibrateBlocking(VIB_REP_MS);
+  Vec3 sum = {0, 0, 0};
+  calibSteps("Arm hoch", "wie beim Melden halten", [&]() {
     Vec3 v = collectStaticRep(1500);
-    Hsum = {Hsum.x + v.x, Hsum.y + v.y, Hsum.z + v.z};
-  }
-  vibrateBlocking(VIB_SCHRITT_MS);
-  return vnorm(Hsum);
+    sum = {sum.x + v.x, sum.y + v.y, sum.z + v.z};
+  });
+  return vnorm(sum);
 }
 
 static float collectNichtMelden() {
-  char rep[32];
-  for (int i = 3; i >= 1; i--) { calibScreen("NICHT MELDEN", "normal bewegen", i); delay(1000); }
   float maxScore = -10.0f;
-  for (int i = 1; i <= CAL_REPS; i++) {
-    snprintf(rep, sizeof(rep), "Wiederholung %d/%d", i, CAL_REPS);
-    calibScreen("NICHT MELDEN", rep, 0);
-    vibrateBlocking(VIB_REP_MS);
-    float s = collectNormalRep(1500);
-    if (s > maxScore) maxScore = s;
-  }
-  vibrateBlocking(VIB_SCHRITT_MS);
+  calibSteps("Nicht melden", "normal bewegen", [&]() {
+    float sc = collectNormalRep(1500);
+    if (sc > maxScore) maxScore = sc;
+  });
   return maxScore;
 }
 
 static Vec3 collectTisch() {
-  char rep[32];
-  for (int i = 3; i >= 1; i--) { calibScreen("TISCH kalibrieren", "Uhr auf den Tisch legen", i); delay(1000); }
-  Vec3 Tsum = {0, 0, 0};
-  for (int i = 1; i <= CAL_REPS; i++) {
-    snprintf(rep, sizeof(rep), "Wiederholung %d/%d", i, CAL_REPS);
-    calibScreen("TISCH halten", rep, 0);
-    vibrateBlocking(VIB_REP_MS);
+  Vec3 sum = {0, 0, 0};
+  calibSteps("Tisch", "Uhr flach hinlegen", [&]() {
     Vec3 v = collectStaticRep(1500);
-    Tsum = {Tsum.x + v.x, Tsum.y + v.y, Tsum.z + v.z};
-  }
-  vibrateBlocking(VIB_SCHRITT_MS);
-  return vnorm(Tsum);
+    sum = {sum.x + v.x, sum.y + v.y, sum.z + v.z};
+  });
+  return vnorm(sum);
 }
 
 static void finishCalibration(bool resetSeit, float maxScore) {
@@ -1667,486 +1604,8 @@ static void clearCalibration() {
 }
 
 // ---------------------------------------------------------------------------
-// Zeichnen
-// ---------------------------------------------------------------------------
-static void centerText(int y, const char *s, uint16_t color, int scale) {
-  int cw = 6 * scale;
-  int w = strlen(s) * cw;
-  canvas->setTextSize(scale);
-  canvas->setTextColor(color);
-  canvas->setCursor(LCD_WIDTH / 2 - w / 2, y);
-  canvas->print(s);
-}
-
-static void formatMMSS(char *buf, size_t n, unsigned long ms) {
-  unsigned long sec = ms / 1000UL;
-  snprintf(buf, n, "%02lu:%02lu", sec / 60UL, sec % 60UL);
-}
-
-static void drawViewCounter() {
-  char buf[24];
-
-  // Uhrzeit (gecacht)
-  if (cachedH >= 0) snprintf(buf, sizeof(buf), "%02d:%02d", cachedH, cachedM);
-  else snprintf(buf, sizeof(buf), "--:--");
-  centerText(80, buf, WHITE, 3);
-
-  // Akku
-  if (cachedPct >= 0) {
-    snprintf(buf, sizeof(buf), "%d%%", cachedPct);
-    canvas->setTextSize(2);
-    canvas->setTextColor(GREEN);
-    canvas->setCursor(LCD_WIDTH / 2 - 30, 128);
-    canvas->print(buf);
-  }
-
-  // Große Zahl
-  snprintf(buf, sizeof(buf), "%d", totalHeute);
-  int scale = 6;
-  int len = strlen(buf);
-  if (len > 3) scale = 4;
-  if (len > 5) scale = 3;
-  centerText(220, buf, YELLOW, scale);
-
-  centerText(305, "Meldungen heute", WHITE, 2);
-
-  // Arm-Zustand
-  const char *zustand;
-  uint16_t zc;
-  if (!sensorOn) {
-    zustand = "Sensor AUS";
-    zc = RED;
-  } else {
-    zustand = imHoch ? "ARM OBEN" : "arm unten";
-    zc = imHoch ? ORANGE : GREEN;
-  }
-  centerText(355, zustand, zc, 3);
-
-  // Position aus Modell
-  const char *posName[2] = {"MELDUNG", "NICHT MELDEN"};
-  snprintf(buf, sizeof(buf), "Pos: %s  p=%d%%",
-           posName[aktuellKlasse], (int)(aktuellProb[aktuellKlasse] * 100));
-  centerText(398, buf, CYAN, 2);
-
-  if (meldungenSeitCalib >= 10) {
-    centerText(440, "Bitte neu kalibrieren!", RED, 2);
-  } else if (showResetHint && millis() - resetHintMs < 1200) {
-    centerText(440, "Zurueckgesetzt!", RED, 2);
-  } else {
-    centerText(440, "Tippen: Statistik", 0x8410 /* grau */, 2);
-  }
-}
-
-static void drawViewStats() {
-  char buf[48];
-
-  if (cachedH >= 0) snprintf(buf, sizeof(buf), "%02d:%02d", cachedH, cachedM);
-  else snprintf(buf, sizeof(buf), "--:--");
-  centerText(70, buf, WHITE, 3);
-
-  snprintf(buf, sizeof(buf), "Heute: %d", totalHeute);
-  centerText(118, buf, YELLOW, 3);
-  snprintf(buf, sizeof(buf), "Session: %d", sessionCount);
-  centerText(156, buf, CYAN, 2);
-  snprintf(buf, sizeof(buf), "Drangenommen: %d", drange);
-  centerText(176, buf, GREEN, 2);
-  char zeitbuf[16];
-  formatMMSS(zeitbuf, sizeof(zeitbuf), meldeZeitMs);
-  snprintf(buf, sizeof(buf), "Meldzeit: %s", zeitbuf);
-  centerText(196, buf, CYAN, 2);
-  snprintf(buf, sizeof(buf), "Richtig: %d   Falsch: %d", richtig, falsch);
-  centerText(216, buf, WHITE, 2);
-
-  // Max für Skalierung
-  int mx = 1;
-  for (int i = 0; i < 60; i++) if (minHist[i] > mx) mx = minHist[i];
-
-  snprintf(buf, sizeof(buf), "pro Minute (max %d)", mx);
-  centerText(236, buf, WHITE, 2);
-
-  // Balkendiagramm (60 Balken)
-  int chartX = 45, chartW = 320, chartBottom = 400, chartTop = 250;
-  canvas->drawFastHLine(chartX - 5, chartBottom + 2, chartW + 10, 0x8410);
-  for (int i = 0; i < 60; i++) {
-    int idx = (minHistIdx + i) % 60;   // älteste zuerst
-    int h = (int)((long)minHist[idx] * (chartBottom - chartTop) / mx);
-    int x = chartX + i * (chartW / 60);
-    int w = (chartW / 60) - 1;
-    if (w < 1) w = 1;
-    uint16_t c = (minHist[idx] > 0) ? GREEN : 0x2104;
-    canvas->fillRect(x, chartBottom - h, w, h, c);
-  }
-
-  centerText(440, "Tippen: Kalibrieren", 0x8410, 2);
-}
-
-#define CALIB_START_X 40
-#define CALIB_START_Y 330
-#define CALIB_START_W 330
-#define CALIB_START_H 65
-
-static void drawViewCalibration() {
-  centerText(120, "KALIBRIERUNG", YELLOW, 3);
-  centerText(200, "1) Arm UNTEN  10x", WHITE, 2);
-  centerText(230, "2) Arm HOCH  10x", WHITE, 2);
-  centerText(260, "3) NICHT MELDEN  10x", WHITE, 2);
-  centerText(290, "4) TISCH  10x", WHITE, 2);
-
-  canvas->fillRoundRect(CALIB_START_X, CALIB_START_Y, CALIB_START_W, CALIB_START_H, 12, 0x18E3);
-  canvas->drawRoundRect(CALIB_START_X, CALIB_START_Y, CALIB_START_W, CALIB_START_H, 12, GREEN);
-  centerText(CALIB_START_Y + 20, "AUSWAHL STARTEN", WHITE, 3);
-
-  char buf[32];
-  if (calibrated) snprintf(buf, sizeof(buf), "kalibriert (%d Meldungen)", meldungenSeitCalib);
-  else snprintf(buf, sizeof(buf), "nicht kalibriert");
-  uint16_t sc = (meldungenSeitCalib >= 10) ? RED : GREEN;
-  centerText(412, buf, sc, 2);
-  centerText(445, "Tippen = Zaehler", 0x8410, 2);
-}
-
-// ---------------------------------------------------------------------------
-// Home-Button + Launcher
-// ---------------------------------------------------------------------------
-#define HOME_BTN_X (LCD_WIDTH - 95)
-#define HOME_BTN_Y 22
-#define HOME_BTN_W 75
-#define HOME_BTN_H 38
-
-#define BACK_BTN_X 40
-#define BACK_BTN_Y 445
-#define BACK_BTN_W 130
-#define BACK_BTN_H 40
-
-static bool inRect(uint16_t x, uint16_t y, int rx, int ry, int rw, int rh) {
-  return x >= rx && x <= rx + rw && y >= ry && y <= ry + rh;
-}
-static bool inHomeButton(uint16_t x, uint16_t y) {
-  return inRect(x, y, HOME_BTN_X, HOME_BTN_Y, HOME_BTN_W, HOME_BTN_H);
-}
-static bool inBackButton(uint16_t x, uint16_t y) {
-  return inRect(x, y, BACK_BTN_X, BACK_BTN_Y, BACK_BTN_W, BACK_BTN_H);
-}
-
-static void textCenterX(int cx, int y, const char *s, uint16_t color, int scale) {
-  int cw = 6 * scale;
-  int w = strlen(s) * cw;
-  canvas->setTextSize(scale);
-  canvas->setTextColor(color);
-  canvas->setCursor(cx - w / 2, y);
-  canvas->print(s);
-}
-
-static void drawHomeButton() {
-  canvas->fillRoundRect(HOME_BTN_X, HOME_BTN_Y, HOME_BTN_W, HOME_BTN_H, 8, 0x4228);
-  canvas->drawRoundRect(HOME_BTN_X, HOME_BTN_Y, HOME_BTN_W, HOME_BTN_H, 8, WHITE);
-  textCenterX(HOME_BTN_X + HOME_BTN_W / 2, HOME_BTN_Y + 10, "HOME", WHITE, 2);
-}
-
-static void drawBackButton() {
-  canvas->fillRoundRect(BACK_BTN_X, BACK_BTN_Y, BACK_BTN_W, BACK_BTN_H, 8, 0x4228);
-  canvas->drawRoundRect(BACK_BTN_X, BACK_BTN_Y, BACK_BTN_W, BACK_BTN_H, 8, WHITE);
-  textCenterX(BACK_BTN_X + BACK_BTN_W / 2, BACK_BTN_Y + 10, "ZURUECK", WHITE, 2);
-}
-
-// ---------------------------------------------------------------------------
-// Watchfaces (5 Stück)
-// ---------------------------------------------------------------------------
-static uint16_t battColor(int pct) {
-  if (pct < 20) return RED;
-  if (pct < 50) return ORANGE;
-  return GREEN;
-}
-
-static void timeLine(char *buf, size_t n, bool seconds) {
-  if (cachedH >= 0) {
-    if (seconds) snprintf(buf, n, "%02d:%02d:%02d", cachedH, cachedM, cachedS);
-    else snprintf(buf, n, "%02d:%02d", cachedH, cachedM);
-  } else {
-    if (seconds) snprintf(buf, n, "--:--:--");
-    else snprintf(buf, n, "--:--");
-  }
-}
-
-static void dateLine(char *buf, size_t n) {
-  if (cachedDay >= 1 && cachedMon >= 1 && cachedYr >= 0) {
-    int wd = weekdayOf(cachedDay, cachedMon, 2000 + cachedYr);
-    snprintf(buf, n, "%s %02d.%02d.%02d", WD_DE[wd], cachedDay, cachedMon, cachedYr);
-  } else {
-    snprintf(buf, n, "-- --.--.--");
-  }
-}
-
-static void drawBatteryIcon(int x, int y, int w, int h, int pct) {
-  uint16_t c = battColor(pct);
-  canvas->drawRoundRect(x, y, w, h, 4, 0x8410);
-  canvas->fillRoundRect(x + 3, y + 3, (w - 6) * pct / 100, h - 6, 3, c);
-  canvas->fillRect(x + w + 1, y + h / 2 - 5, 4, 10, 0x8410);  // Plus-Pol
-}
-
-// dicke Uhrzeiger-Linie
-static void drawHand(int cx, int cy, float angleDeg, int len, int w, uint16_t color) {
-  float a = angleDeg * PI / 180.0f;
-  int x1 = cx + (int)(len * sinf(a));
-  int y1 = cy - (int)(len * cosf(a));
-  float dx = x1 - cx, dy = y1 - cy;
-  float d = sqrtf(dx * dx + dy * dy);
-  if (d < 1.0f) return;
-  float px = -dy / d, py = dx / d;
-  for (int i = -w / 2; i <= w / 2; i++) {
-    canvas->drawLine(cx + (int)(px * i), cy + (int)(py * i),
-                     x1 + (int)(px * i), y1 + (int)(py * i), color);
-  }
-}
-
-// 0) Minimal
-static void wfMinimal() {
-  char buf[48];
-  timeLine(buf, sizeof(buf), false);
-  centerText(165, buf, WHITE, 5);
-  dateLine(buf, sizeof(buf));
-  centerText(252, buf, 0x8410, 2);
-
-  // Aktuelle + naechste Stunde (dezent, passend zum minimalistischen Stil)
-  if (ttActive && cachedDay >= 1 && cachedMon >= 1 && cachedYr >= 0) {
-    int wd = weekdayOf(cachedDay, cachedMon, 2000 + cachedYr);
-    int cur = findPeriod(wd, cachedH, cachedM);
-    int nxt = nextLessonIdx(wd, cachedH, cachedM);
-    char curName[24];
-    if (cur >= 0) snprintf(curName, sizeof(curName), "%s", ttDays[wd][cur].name);
-    else snprintf(curName, sizeof(curName), "Pause");
-    if (nxt >= 0) snprintf(buf, sizeof(buf), "%s | %s", curName, ttDays[wd][nxt].name);
-    else snprintf(buf, sizeof(buf), "%s", curName);
-    centerText(280, buf, 0x8410, 2);
-  }
-
-  canvas->drawFastHLine(110, 300, 190, 0x39C7);
-  if (cachedPct >= 0)
-    snprintf(buf, sizeof(buf), "%d%%  |  %d Meldungen", cachedPct, totalHeute);
-  else
-    snprintf(buf, sizeof(buf), "%d Meldungen", totalHeute);
-  centerText(362, buf, 0x8410, 2);
-}
-
-// 1) Farbig
-static void wfColorful() {
-  char buf[48];
-  const uint16_t cols[6] = {RED, ORANGE, YELLOW, GREEN, CYAN, MAGENTA};
-  for (int i = 0; i < 6; i++) {
-    float a0 = 180 + i * 30.0f;
-    float a1 = (i == 5) ? 359.0f : 180 + (i + 1) * 30.0f;
-    canvas->drawArc(205, 150, 62, 76, a0, a1, cols[i]);
-  }
-  timeLine(buf, sizeof(buf), false);
-  centerText(245, buf, YELLOW, 5);
-  dateLine(buf, sizeof(buf));
-  centerText(310, buf, CYAN, 2);
-  if (cachedPct >= 0) {
-    snprintf(buf, sizeof(buf), "%d%%", cachedPct);
-    centerText(365, buf, battColor(cachedPct), 3);
-  }
-  snprintf(buf, sizeof(buf), "%d", totalHeute);
-  centerText(415, buf, GREEN, 3);
-  centerText(452, "Meldungen", 0x8410, 2);
-}
-
-// 2) Analog
-static void wfAnalog() {
-  char buf[48];
-  int cx = 205, cy = 208, R = 140, RN = R - 55;
-
-  canvas->drawCircle(cx, cy, R, WHITE);
-  canvas->drawCircle(cx, cy, R - 8, 0x3186);
-
-  for (int i = 0; i < 60; i++) {
-    float a = i * 6.0f * PI / 180.0f;
-    float s = sinf(a), c = cosf(a);
-    int major = (i % 5 == 0);
-    int rOut = R - 8, rIn = major ? R - 30 : R - 16;
-    canvas->drawLine(cx + (int)(rIn * s), cy - (int)(rIn * c),
-                     cx + (int)(rOut * s), cy - (int)(rOut * c),
-                     major ? WHITE : 0x39C7);
-  }
-
-  textCenterX(cx, cy - RN - 6, "12", 0x8410, 2);
-  textCenterX(cx + RN, cy - 8, "3", 0x8410, 2);
-  textCenterX(cx, cy + RN - 10, "6", 0x8410, 2);
-  textCenterX(cx - RN, cy - 8, "9", 0x8410, 2);
-
-  if (cachedH >= 0) {
-    float ha = (cachedH % 12) * 30.0f + cachedM * 0.5f;
-    float ma = cachedM * 6.0f + cachedS * 0.1f;
-    float sa = cachedS * 6.0f;
-    drawHand(cx, cy, ha, 82, 7, WHITE);
-    drawHand(cx, cy, ma, 118, 5, WHITE);
-    int sxp = cx + (int)(132 * sinf(sa * PI / 180.0f));
-    int syp = cy - (int)(132 * cosf(sa * PI / 180.0f));
-    int sxt = cx - (int)(34 * sinf(sa * PI / 180.0f));
-    int syt = cy + (int)(34 * cosf(sa * PI / 180.0f));
-    canvas->drawLine(sxt, syt, sxp, syp, RED);
-  }
-  canvas->fillCircle(cx, cy, 8, RED);
-  canvas->fillCircle(cx, cy, 3, WHITE);
-
-  dateLine(buf, sizeof(buf));
-  centerText(375, buf, 0x8410, 2);
-  drawBatteryIcon(60, 418, 120, 32, cachedPct >= 0 ? cachedPct : 0);
-  if (cachedPct >= 0) {
-    snprintf(buf, sizeof(buf), "%d%%", cachedPct);
-    canvas->setTextSize(2);
-    canvas->setTextColor(WHITE);
-    canvas->setCursor(190, 424);
-    canvas->print(buf);
-  }
-  snprintf(buf, sizeof(buf), "%d Mel.", totalHeute);
-  canvas->setTextSize(2);
-  canvas->setTextColor(YELLOW);
-  canvas->setCursor(250, 424);
-  canvas->print(buf);
-}
-
-// 3) Digital (groß)
-static void wfBig() {
-  char buf[48];
-  timeLine(buf, sizeof(buf), false);
-  centerText(150, buf, WHITE, 8);
-
-  if (cachedS >= 0) {
-    snprintf(buf, sizeof(buf), ":%02d", cachedS);
-    centerText(252, buf, 0x8410, 3);
-  }
-
-  dateLine(buf, sizeof(buf));
-  centerText(320, buf, CYAN, 2);
-
-  int bx = 70, by = 385, bw = 270, bh = 26;
-  canvas->drawRoundRect(bx, by, bw, bh, 8, 0x8410);
-  if (cachedPct >= 0) {
-    canvas->fillRoundRect(bx + 3, by + 3, (bw - 6) * cachedPct / 100, bh - 6, 6, battColor(cachedPct));
-    snprintf(buf, sizeof(buf), "%d%%", cachedPct);
-    canvas->setTextSize(2);
-    canvas->setTextColor(WHITE);
-    canvas->setCursor(bx + bw / 2 - 16, by + 2);
-    canvas->print(buf);
-  }
-
-  snprintf(buf, sizeof(buf), "%d Meldungen heute", totalHeute);
-  centerText(450, buf, YELLOW, 2);
-}
-
-// 4) Geometrisch
-static void wfGeometric() {
-  char buf[48];
-  canvas->fillCircle(70, 110, 52, YELLOW);
-  canvas->fillCircle(340, 110, 52, CYAN);
-  canvas->fillRect(0, 185, 410, 130, MAGENTA);
-
-  timeLine(buf, sizeof(buf), false);
-  centerText(215, buf, WHITE, 6);
-  dateLine(buf, sizeof(buf));
-  centerText(292, buf, BLACK, 2);
-
-  drawBatteryIcon(45, 400, 120, 36, cachedPct >= 0 ? cachedPct : 0);
-  if (cachedPct >= 0) {
-    snprintf(buf, sizeof(buf), "%d%%", cachedPct);
-    canvas->setTextSize(2);
-    canvas->setTextColor(WHITE);
-    canvas->setCursor(175, 408);
-    canvas->print(buf);
-  }
-  canvas->fillRoundRect(240, 395, 130, 44, 10, GREEN);
-  snprintf(buf, sizeof(buf), "%d Mel.", totalHeute);
-  canvas->setTextSize(2);
-  canvas->setTextColor(BLACK);
-  canvas->setCursor(250, 407);
-  canvas->print(buf);
-}
-
-// 5) Schule (Stundenplan + Statistik)
-static void wfSchool() {
-  char buf[48];
-
-  timeLine(buf, sizeof(buf), false);
-  centerText(48, buf, WHITE, 5);
-
-  dateLine(buf, sizeof(buf));
-  centerText(104, buf, 0x8410, 2);
-
-  if (ttActive && cachedDay >= 1 && cachedMon >= 1 && cachedYr >= 0) {
-    int wd = weekdayOf(cachedDay, cachedMon, 2000 + cachedYr);
-    int cur = findPeriod(wd, cachedH, cachedM);
-    int nxt = nextLessonIdx(wd, cachedH, cachedM);
-
-    canvas->fillRoundRect(30, 132, 350, 96, 12, 0x2104);
-    canvas->drawRoundRect(30, 132, 350, 96, 12, CYAN);
-    canvas->setTextSize(2);
-    canvas->setTextColor(CYAN);
-    canvas->setCursor(45, 148);
-    canvas->print("JETZT");
-    canvas->setTextColor(WHITE);
-    canvas->setCursor(45, 174);
-    if (cur >= 0) {
-      snprintf(buf, sizeof(buf), "%s", ttDays[wd][cur].name);
-      canvas->print(buf);
-      snprintf(buf, sizeof(buf), "%02d:%02d - %02d:%02d",
-               ttDays[wd][cur].sh, ttDays[wd][cur].sm,
-               ttDays[wd][cur].eh, ttDays[wd][cur].em);
-      canvas->setTextColor(0x8410);
-      canvas->setCursor(45, 200);
-      canvas->print(buf);
-    } else {
-      canvas->print("Pause / frei");
-    }
-
-    if (nxt >= 0) {
-      canvas->setTextSize(2);
-      canvas->setTextColor(YELLOW);
-      canvas->setCursor(45, 250);
-      canvas->print("DANACH");
-      snprintf(buf, sizeof(buf), "%s  %02d:%02d", ttDays[wd][nxt].name,
-               ttDays[wd][nxt].sh, ttDays[wd][nxt].sm);
-      canvas->setTextColor(WHITE);
-      canvas->setCursor(45, 276);
-      canvas->print(buf);
-    }
-  } else {
-    centerText(170, "kein Stundenplan", 0x8410, 2);
-    centerText(200, "App -> Stundenplan senden", 0x8410, 2);
-  }
-
-  canvas->drawFastHLine(60, 306, 290, 0x39C7);
-  snprintf(buf, sizeof(buf), "%d Meldungen heute", totalHeute);
-  centerText(336, buf, YELLOW, 2);
-  snprintf(buf, sizeof(buf), "Session: %d", sessionCount);
-  centerText(366, buf, CYAN, 2);
-  drawBatteryIcon(45, 398, 120, 36, cachedPct >= 0 ? cachedPct : 0);
-  if (cachedPct >= 0) {
-    snprintf(buf, sizeof(buf), "%d%%", cachedPct);
-    canvas->setTextSize(2);
-    canvas->setTextColor(WHITE);
-    canvas->setCursor(175, 406);
-    canvas->print(buf);
-  }
-}
-
-static void drawWatchface() {
-  switch (watchface) {
-    case 0: wfMinimal(); break;
-    case 1: wfColorful(); break;
-    case 2: wfAnalog(); break;
-    case 3: wfBig(); break;
-    case 4: wfGeometric(); break;
-    default: wfSchool(); break;
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Einstellungen
 // ---------------------------------------------------------------------------
-static void applyBrightness() {
-  gfx->setBrightness(brightness);
-  prefs.putInt("bright", brightness);
-}
-
 static void setSensorOn(bool on) {
   sensorOn = on;
   prefs.putInt("sensorOn", on ? 1 : 0);
@@ -2174,247 +1633,6 @@ static void setMuteInLessons(bool on) {
   muteInLessons = on;
   prefs.putInt("muteLessons", on ? 1 : 0);
   USBSerial.printf("Stumm in Stunden %s\n", on ? "AN" : "AUS");
-}
-
-static void drawSettingsMenu() {
-  centerText(70, "EINSTELLUNGEN", YELLOW, 3);
-  const char *items[5] = {"Helligkeit", "WLAN", "Bluetooth", "Sensor", "Motor"};
-  for (int i = 0; i < 5; i++) {
-    int ry = 118 + i * 68;
-    canvas->fillRoundRect(40, ry, 330, 60, 12, 0x18E3);
-    canvas->drawRoundRect(40, ry, 330, 60, 12, WHITE);
-    char buf[48];
-    if (i == 0) snprintf(buf, sizeof(buf), "Helligkeit   %d%%", brightness * 100 / 255);
-    else if (i == 1) snprintf(buf, sizeof(buf), "WLAN   %s", WiFi.status() == WL_CONNECTED ? "verbunden" : "aus");
-    else if (i == 2) snprintf(buf, sizeof(buf), "Bluetooth   %s", btOn ? "an" : "aus");
-    else if (i == 3) snprintf(buf, sizeof(buf), "Sensor   %s", sensorOn ? "an" : "aus");
-    else snprintf(buf, sizeof(buf), "Motor   %s", motorOn ? "an" : "aus");
-    canvas->setTextSize(2);
-    canvas->setTextColor(WHITE);
-    canvas->setCursor(60, ry + 20);
-    canvas->print(buf);
-  }
-  drawHomeButton();
-  centerText(462, "Tippen = auswaehlen", 0x8410, 2);
-}
-
-static void drawBrightness() {
-  centerText(55, "HELLIGKEIT", YELLOW, 3);
-  char buf[24];
-  snprintf(buf, sizeof(buf), "%d%%", brightness * 100 / 255);
-  centerText(170, buf, CYAN, 5);
-
-  int bx = 40, by = 280, bw = 330, bh = 40;
-  canvas->drawRoundRect(bx, by, bw, bh, 8, WHITE);
-  int fill = (int)((long)brightness * (bw - 6) / 255);
-  canvas->fillRect(bx + 3, by + 3, fill, bh - 6, YELLOW);
-
-  canvas->fillRoundRect(60, 360, 100, 70, 12, RED);
-  textCenterX(110, 382, "-", BLACK, 4);
-  canvas->fillRoundRect(250, 360, 100, 70, 12, GREEN);
-  textCenterX(300, 382, "+", BLACK, 4);
-  drawBackButton();
-  drawHomeButton();
-}
-
-static String wifiSSIDs[10];
-static int wifiCount = 0;
-static uint8_t wifiAuth[10];
-
-static void wifiScanNow() {
-  canvas->fillScreen(BLACK);
-  centerText(220, "Scanne WLAN ...", YELLOW, 3);
-  canvas->flush();
-  WiFi.mode(WIFI_STA);
-  WiFi.disconnect();
-  delay(100);
-  int n = WiFi.scanNetworks();
-  wifiCount = n > 10 ? 10 : n;
-  for (int i = 0; i < wifiCount; i++) {
-    wifiSSIDs[i] = WiFi.SSID(i);
-    wifiAuth[i] = (uint8_t)WiFi.encryptionType(i);
-  }
-  WiFi.scanDelete();
-  wifiOffset = 0;
-  USBSerial.printf("WLAN-Scan: %d Netze\n", wifiCount);
-}
-
-static void wifiConnect(const String &ssid) {
-  canvas->fillScreen(BLACK);
-  centerText(200, "Verbinde ...", YELLOW, 3);
-  canvas->flush();
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(ssid.c_str(), wifiPass.c_str());
-  unsigned long t0 = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - t0 < 12000) delay(200);
-  if (WiFi.status() == WL_CONNECTED) {
-    USBSerial.printf("WLAN verbunden: %s IP=%s\n", ssid.c_str(), WiFi.localIP().toString().c_str());
-  } else {
-    USBSerial.println("WLAN-Verbindung fehlgeschlagen.");
-  }
-  wifiPass = "";
-}
-
-static void drawWifi() {
-  centerText(55, "WLAN", YELLOW, 3);
-  if (WiFi.status() == WL_CONNECTED) {
-    char buf[40];
-    snprintf(buf, sizeof(buf), "Verbunden: %s", WiFi.SSID().c_str());
-    centerText(98, buf, GREEN, 2);
-    snprintf(buf, sizeof(buf), "IP: %s", WiFi.localIP().toString().c_str());
-    centerText(126, buf, WHITE, 2);
-  } else {
-    centerText(112, "nicht verbunden", 0x8410, 2);
-  }
-
-  canvas->fillRoundRect(40, 145, 190, 42, 10, 0x18E3);
-  canvas->drawRoundRect(40, 145, 190, 42, 10, WHITE);
-  textCenterX(135, 155, "SCANNEN", WHITE, 2);
-  canvas->fillRoundRect(240, 145, 130, 42, 10, 0x4228);
-  canvas->drawRoundRect(240, 145, 130, 42, 10, WHITE);
-  textCenterX(305, 155, "TRENNEN", WHITE, 2);
-
-  if (wifiCount == 0) {
-    centerText(230, "keine Netze - erst Scannen", 0x8410, 2);
-  } else {
-    for (int r = 0; r < 4; r++) {
-      int idx = wifiOffset + r;
-      if (idx >= wifiCount) break;
-      int y = 205 + r * 52;
-      uint16_t c = (wifiAuth[idx] == WIFI_AUTH_OPEN) ? GREEN : 0xE5A0;
-      canvas->fillRoundRect(40, y, 330, 46, 8, 0x2104);
-      canvas->drawRoundRect(40, y, 330, 46, 8, c);
-      String label = wifiSSIDs[idx];
-      if (label.length() > 18) label = label.substring(0, 18) + "..";
-      if (wifiAuth[idx] != WIFI_AUTH_OPEN) label = "*" + label;
-      canvas->setTextSize(2);
-      canvas->setTextColor(c);
-      canvas->setCursor(52, y + 14);
-      canvas->print(label);
-    }
-  }
-
-  canvas->fillRoundRect(190, 445, 60, 40, 8, 0x4228);
-  textCenterX(220, 452, "^", WHITE, 2);
-  canvas->fillRoundRect(260, 445, 60, 40, 8, 0x4228);
-  textCenterX(290, 452, "v", WHITE, 2);
-  drawBackButton();
-  drawHomeButton();
-}
-
-static const char *PW_CHARS = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-!@";
-
-static char cycleChar(char c, int dir) {
-  int n = strlen(PW_CHARS);
-  for (int i = 0; i < n; i++) {
-    if (PW_CHARS[i] == c) {
-      int j = (i + dir) % n;
-      if (j < 0) j += n;
-      return PW_CHARS[j];
-    }
-  }
-  return 'a';
-}
-
-static void drawPWButton(int col, int row, const char *label) {
-  int x = 40 + col * 115;
-  int y = 300 + row * 75;
-  canvas->fillRoundRect(x, y, 100, 55, 10, 0x4228);
-  canvas->drawRoundRect(x, y, 100, 55, 10, WHITE);
-  textCenterX(x + 50, y + 18, label, WHITE, 2);
-}
-
-static void drawWifiPassword() {
-  centerText(45, "PASSWORT", YELLOW, 3);
-  centerText(95, wifiTargetSSID.c_str(), CYAN, 2);
-
-  // Eingabe anzeigen
-  int scale = 2, cw = 12;
-  int len = wifiPass.length();
-  int startX = LCD_WIDTH / 2 - len * cw / 2;
-  canvas->setTextSize(scale);
-  canvas->setTextColor(WHITE);
-  canvas->setCursor(startX, 150);
-  canvas->print(wifiPass);
-  canvas->fillRect(startX + len * cw, 170, cw, 4, YELLOW);   // Cursor am Ende
-
-  // Ziffernblock: 1..9, DEL, 0, OK
-  const char *keys[12] = {"1", "2", "3", "4", "5", "6", "7", "8", "9", "DEL", "0", "OK"};
-  for (int r = 0; r < 4; r++) {
-    for (int c = 0; c < 3; c++) {
-      int idx = r * 3 + c;
-      int x = 40 + c * 115;
-      int y = 190 + r * 60;
-      uint16_t bg = (idx >= 9) ? 0x4228 : 0x18E3;
-      canvas->fillRoundRect(x, y, 100, 52, 10, bg);
-      canvas->drawRoundRect(x, y, 100, 52, 10, WHITE);
-      textCenterX(x + 50, y + 14, keys[idx], WHITE, 2);
-    }
-  }
-  drawBackButton();
-  drawHomeButton();
-}
-
-static void drawBluetooth() {
-  centerText(55, "BLUETOOTH", YELLOW, 3);
-  if (btOn) {
-    centerText(140, "Aktiviert", GREEN, 3);
-    centerText(190, "Name: Meldezaehler", WHITE, 2);
-    centerText(220, "Geraet ist sichtbar / pairbar", 0x8410, 2);
-  } else {
-    centerText(160, "Deaktiviert", 0x8410, 3);
-  }
-  canvas->fillRoundRect(60, 300, 120, 70, 12, GREEN);
-  textCenterX(120, 322, "AN", BLACK, 3);
-  canvas->fillRoundRect(230, 300, 120, 70, 12, RED);
-  textCenterX(290, 322, "AUS", BLACK, 3);
-  drawBackButton();
-  drawHomeButton();
-}
-
-static void drawSensor() {
-  centerText(55, "SENSOR", YELLOW, 3);
-  if (sensorOn) {
-    centerText(130, "Erkennung aktiv", GREEN, 3);
-    centerText(180, "IMU misst Meldungen", WHITE, 2);
-    centerText(210, "normaler Energieverbrauch", 0x8410, 2);
-  } else {
-    centerText(130, "Deaktiviert", 0x8410, 3);
-    centerText(180, "spart Energie", WHITE, 2);
-    centerText(210, "vermeidet Fehlmeldungen", WHITE, 2);
-  }
-  canvas->fillRoundRect(60, 300, 120, 70, 12, GREEN);
-  textCenterX(120, 322, "AN", BLACK, 3);
-  canvas->fillRoundRect(230, 300, 120, 70, 12, RED);
-  textCenterX(290, 322, "AUS", BLACK, 3);
-  drawBackButton();
-  drawHomeButton();
-}
-
-static void drawMotor() {
-  centerText(50, "MOTOR", YELLOW, 3);
-
-  centerText(98, "Vibration", WHITE, 2);
-  canvas->fillRoundRect(60, 122, 120, 60, 12, motorOn ? GREEN : 0x4228);
-  canvas->drawRoundRect(60, 122, 120, 60, 12, WHITE);
-  textCenterX(120, 142, "AN", motorOn ? BLACK : WHITE, 3);
-  canvas->fillRoundRect(230, 122, 120, 60, 12, !motorOn ? RED : 0x4228);
-  canvas->drawRoundRect(230, 122, 120, 60, 12, WHITE);
-  textCenterX(290, 142, "AUS", !motorOn ? BLACK : WHITE, 3);
-
-  centerText(218, "Stumm in Stunden", WHITE, 2);
-  canvas->fillRoundRect(60, 242, 120, 60, 12, muteInLessons ? GREEN : 0x4228);
-  canvas->drawRoundRect(60, 242, 120, 60, 12, WHITE);
-  textCenterX(120, 262, "AN", muteInLessons ? BLACK : WHITE, 3);
-  canvas->fillRoundRect(230, 242, 120, 60, 12, !muteInLessons ? RED : 0x4228);
-  canvas->drawRoundRect(230, 242, 120, 60, 12, WHITE);
-  textCenterX(290, 262, "AUS", !muteInLessons ? BLACK : WHITE, 3);
-
-  centerText(340, "Stumm = keine Vibration", 0x8410, 2);
-  centerText(370, "waehrend des Unterrichts", 0x8410, 2);
-
-  drawBackButton();
-  drawHomeButton();
 }
 
 #define BLE_SERVICE_UUID     "4fafc201-1fb5-459e-8fcc-c5c9c331914b"
@@ -2476,7 +1694,7 @@ static void processBleCommands() {
         t.m = (uint8_t)c.data[4];
         t.s = (uint8_t)c.data[5];
         rtcWrite(t);
-        lastEnvMs = 0;       // Drosselung umgehen -> neue Zeit sofort übernehmen
+        lastEnvMs = lastRtcMs = 0;   // Drosselung umgehen -> neue Zeit sofort übernehmen
         updateEnv();
         USBSerial.println("Zeit/Datum per BLE gesetzt");
       }
@@ -2486,7 +1704,6 @@ static void processBleCommands() {
     } else {
       handleTTCommand(String(c.data));
     }
-    redrawNow = true;
   }
 }
 
@@ -2536,492 +1753,6 @@ static void btDisable() {
 }
 
 // ---------------------------------------------------------------------------
-// App-Tray + Zifferblatt-Auswahl
-// ---------------------------------------------------------------------------
-static void drawAppTray() {
-  centerText(60, "APPS", YELLOW, 3);
-  char buf[32];
-
-  // Meldezähler
-  canvas->fillRoundRect(40, 100, 160, 120, 16, 0x18C3);
-  canvas->drawRoundRect(40, 100, 160, 120, 16, CYAN);
-  textCenterX(120, 135, "MELDE-", BLACK, 2);
-  textCenterX(120, 160, "ZAEHLER", BLACK, 2);
-  snprintf(buf, sizeof(buf), "Heute: %d", totalHeute);
-  textCenterX(120, 190, buf, BLACK, 2);
-
-  // Einstellungen
-  canvas->fillRoundRect(210, 100, 160, 120, 16, 0xE5A0);
-  canvas->drawRoundRect(210, 100, 160, 120, 16, YELLOW);
-  textCenterX(290, 135, "EINSTEL-", BLACK, 2);
-  textCenterX(290, 160, "LUNGEN", BLACK, 2);
-  textCenterX(290, 190, "WiFi/BT", BLACK, 2);
-
-  // Zeit
-  canvas->fillRoundRect(40, 230, 160, 120, 16, 0xD69A);
-  canvas->drawRoundRect(40, 230, 160, 120, 16, MAGENTA);
-  textCenterX(120, 265, "ZEIT", BLACK, 2);
-  textCenterX(120, 290, "Timer +", BLACK, 2);
-  textCenterX(120, 320, "Stoppuhr", BLACK, 2);
-
-  // Sensor-Aufnahme
-  canvas->fillRoundRect(210, 230, 160, 120, 16, 0xFC18);
-  canvas->drawRoundRect(210, 230, 160, 120, 16, GREEN);
-  textCenterX(290, 265, "SENSOR-", BLACK, 2);
-  textCenterX(290, 290, "AUFNAHME", BLACK, 2);
-  textCenterX(290, 320, "Trainingsdaten", BLACK, 2);
-
-  // Test
-  canvas->fillRoundRect(40, 360, 330, 72, 14, 0xBDF7);
-  canvas->drawRoundRect(40, 360, 330, 72, 14, WHITE);
-  textCenterX(205, 380, "TEST", BLACK, 3);
-  textCenterX(205, 412, "Motor/Sensor/Akku", BLACK, 2);
-
-  drawBackButton();
-}
-
-static void drawTestApp() {
-  centerText(55, "TEST", YELLOW, 3);
-  char buf[48];
-
-  // Motor
-  canvas->fillRoundRect(40, 100, 330, 64, 12, 0x18E3);
-  canvas->drawRoundRect(40, 100, 330, 64, 12, WHITE);
-  canvas->setTextSize(2);
-  canvas->setTextColor(WHITE);
-  canvas->setCursor(60, 112);
-  canvas->print("MOTOR");
-  canvas->setTextColor(CYAN);
-  canvas->setCursor(60, 138);
-  canvas->print("kurz vibrieren");
-
-  // Sensor (live)
-  canvas->fillRoundRect(40, 175, 330, 64, 12, 0x18E3);
-  canvas->drawRoundRect(40, 175, 330, 64, 12, WHITE);
-  canvas->setTextColor(WHITE);
-  canvas->setCursor(60, 187);
-  canvas->print("SENSOR");
-  if (!sensorOn) {
-    snprintf(buf, sizeof(buf), "Sensor AUS");
-  } else {
-    const char *posName[2] = {"MELDUNG", "NICHT MELDEN"};
-    snprintf(buf, sizeof(buf), "Pos: %s  p=%d%%", posName[aktuellKlasse],
-             (int)(aktuellProb[aktuellKlasse] * 100));
-  }
-  canvas->setTextColor(CYAN);
-  canvas->setCursor(60, 213);
-  canvas->print(buf);
-
-  // Akku (live)
-  canvas->fillRoundRect(40, 250, 330, 64, 12, 0x18E3);
-  canvas->drawRoundRect(40, 250, 330, 64, 12, WHITE);
-  canvas->setTextColor(WHITE);
-  canvas->setCursor(60, 262);
-  canvas->print("AKKU");
-  uint16_t battMV = pmu.getBattVoltage();
-  if (battMV > 0) {
-    snprintf(buf, sizeof(buf), "%d%%  %.2fV  %s", cachedPct, battMV / 1000.0f,
-             pmu.isCharging() ? "laedt" : "Akku");
-  } else {
-    snprintf(buf, sizeof(buf), "kein Akku");
-  }
-  canvas->setTextColor(CYAN);
-  canvas->setCursor(60, 288);
-  canvas->print(buf);
-
-  // Status
-  if (testInfo[0] && millis() - testInfoMs < 2500) {
-    centerText(415, testInfo, GREEN, 2);
-  } else {
-    centerText(415, "Tippen = testen", 0x8410, 2);
-  }
-
-  drawBackButton();
-}
-
-static void drawSensorRec() {
-  centerText(60, "SENSOR-AUFNAHME", YELLOW, 3);
-  char buf[48];
-
-  if (sensorRec) {
-    snprintf(buf, sizeof(buf), "%s #%u", sensorRecLabel.c_str(), (unsigned)sensorRecTrial);
-    centerText(110, buf, RED, 3);
-    snprintf(buf, sizeof(buf), "%d Samples", sensorRecCount);
-    centerText(160, buf, CYAN, 2);
-
-    canvas->fillRoundRect(40, 210, 330, 120, 14, RED);
-    canvas->drawRoundRect(40, 210, 330, 120, 14, WHITE);
-    textCenterX(205, 252, "STOPPEN", WHITE, 4);
-    centerText(390, "Aufnahme laeuft ...", GREEN, 2);
-  } else {
-    centerText(105, "Klasse antippen:", 0x8410, 2);
-    const char *names[2] = {
-      "MELDUNG",
-      "NICHT MELDEN",
-    };
-    for (int i = 0; i < 2; i++) {
-      int y = 160 + i * 110;
-      canvas->fillRoundRect(40, y, 330, 90, 14, 0x18E3);
-      canvas->drawRoundRect(40, y, 330, 90, 14, WHITE);
-      canvas->setTextSize(3);
-      canvas->setTextColor(WHITE);
-      canvas->setCursor(60, y + 32);
-      canvas->print(names[i]);
-    }
-    centerText(430, "NICHT MELDEN: einfach normal bewegen", 0x8410, 2);
-  }
-  drawBackButton();
-}
-
-static const char *WF_NAMES[6] = {"Minimal", "Farbig", "Analog", "Digital", "Geometrisch", "Schule"};
-
-static void wfIcon(int i, int cx, int cy) {
-  switch (i) {
-    case 0: canvas->drawCircle(cx, cy, 14, WHITE); break;
-    case 1:
-      canvas->fillCircle(cx - 12, cy, 6, RED);
-      canvas->fillCircle(cx, cy, 6, GREEN);
-      canvas->fillCircle(cx + 12, cy, 6, CYAN);
-      break;
-    case 2:
-      canvas->drawCircle(cx, cy, 14, WHITE);
-      canvas->drawLine(cx, cy, cx, cy - 10, WHITE);
-      canvas->drawLine(cx, cy, cx + 7, cy + 6, WHITE);
-      break;
-    case 3: textCenterX(cx, cy - 8, "88", WHITE, 1); break;
-    case 4: canvas->fillRect(cx - 12, cy - 12, 24, 24, MAGENTA); break;
-    default:
-      // Schule: Uhr + Stundenlinien
-      canvas->drawCircle(cx, cy, 14, WHITE);
-      canvas->drawLine(cx - 10, cy - 10, cx + 10, cy - 10, WHITE);
-      canvas->drawLine(cx - 10, cy, cx + 10, cy, WHITE);
-      canvas->drawLine(cx - 10, cy + 10, cx + 10, cy + 10, WHITE);
-      break;
-  }
-}
-
-static void drawWfPicker() {
-  centerText(62, "ZIFERBLATT", YELLOW, 3);
-  for (int i = 0; i < 6; i++) {
-    int y = 100 + i * 56;
-    bool sel = (i == watchfaceSel);
-    canvas->fillRoundRect(40, y, 330, 50, 12, sel ? 0x4228 : 0x18E3);
-    canvas->drawRoundRect(40, y, 330, 50, 12, sel ? YELLOW : 0x8410);
-    canvas->setTextSize(2);
-    canvas->setTextColor(sel ? YELLOW : WHITE);
-    canvas->setCursor(62, y + 15);
-    canvas->print(WF_NAMES[i]);
-    wfIcon(i, 320, y + 25);
-  }
-  drawBackButton();
-}
-
-static void drawCalibSelect() {
-  centerText(60, "WAS KALIBRIEREN?", YELLOW, 3);
-  const char *items[6] = {"KOMPLETT (alles)", "Arm UNTEN", "Arm HOCH", "NICHT MELDEN", "TISCH (Uhr auf Tisch)", "LOESCHEN + Neustart"};
-  for (int i = 0; i < 6; i++) {
-    int y = 96 + i * 56;
-    canvas->fillRoundRect(40, y, 330, 50, 10, 0x18E3);
-    canvas->drawRoundRect(40, y, 330, 50, 10, i == 0 ? YELLOW : (i == 5 ? RED : 0x8410));
-    canvas->setTextSize(2);
-    canvas->setTextColor(i == 0 ? YELLOW : (i == 5 ? RED : WHITE));
-    canvas->setCursor(60, y + 15);
-    canvas->print(items[i]);
-  }
-  drawBackButton();
-}
-
-static void drawZeitApp() {
-  char buf[32];
-
-  if (zeitTab == 2) {
-    // Alarm läuft
-    centerText(120, "TIMER", YELLOW, 3);
-    centerText(200, "ABGELAUFEN!", RED, 4);
-    canvas->fillRoundRect(40, 300, 330, 90, 14, RED);
-    canvas->drawRoundRect(40, 300, 330, 90, 14, WHITE);
-    textCenterX(205, 332, "STOPPEN", WHITE, 3);
-    drawBackButton();
-    return;
-  }
-
-  // Tabs
-  canvas->fillRoundRect(40, 40, 160, 45, 10, zeitTab == 0 ? 0x4228 : 0x18E3);
-  canvas->drawRoundRect(40, 40, 160, 45, 10, zeitTab == 0 ? YELLOW : 0x8410);
-  textCenterX(120, 52, "TIMER", zeitTab == 0 ? YELLOW : WHITE, 2);
-
-  canvas->fillRoundRect(210, 40, 160, 45, 10, zeitTab == 1 ? 0x4228 : 0x18E3);
-  canvas->drawRoundRect(210, 40, 160, 45, 10, zeitTab == 1 ? YELLOW : 0x8410);
-  textCenterX(290, 52, "STOPPUHR", zeitTab == 1 ? YELLOW : WHITE, 2);
-
-  if (zeitTab == 0) {
-    formatMMSS(buf, sizeof(buf), timerRemainingMs);
-    centerText(130, buf, WHITE, 5);
-
-    if (timerRunning) {
-      centerText(195, "laeuft ...", GREEN, 2);
-      canvas->fillRoundRect(40, 260, 200, 80, 14, 0xE5A0);
-      canvas->drawRoundRect(40, 260, 200, 80, 14, WHITE);
-      textCenterX(140, 288, "PAUSE", BLACK, 3);
-    } else {
-      const char *labels[4] = {"MIN -", "MIN +", "SEK -", "SEK +"};
-      int xs[4] = {40, 120, 220, 300};
-      for (int i = 0; i < 4; i++) {
-        canvas->fillRoundRect(xs[i], 195, 70, 50, 10, 0x18E3);
-        canvas->drawRoundRect(xs[i], 195, 70, 50, 10, WHITE);
-        canvas->setTextSize(2);
-        canvas->setTextColor(WHITE);
-        canvas->setCursor(xs[i] + 8, 210);
-        canvas->print(labels[i]);
-      }
-      canvas->fillRoundRect(40, 260, 200, 80, 14, GREEN);
-      canvas->drawRoundRect(40, 260, 200, 80, 14, WHITE);
-      textCenterX(140, 288, "START", BLACK, 3);
-    }
-
-    canvas->fillRoundRect(250, 260, 120, 80, 14, RED);
-    canvas->drawRoundRect(250, 260, 120, 80, 14, WHITE);
-    textCenterX(310, 288, "RESET", BLACK, 3);
-  } else {
-    unsigned long sw = stopwatchBaseMs;
-    if (stopwatchRunning) sw += millis() - stopwatchStartMs;
-    unsigned long cs = (sw / 10UL) % 100UL;
-    unsigned long sec = sw / 1000UL;
-    snprintf(buf, sizeof(buf), "%02lu:%02lu:%02lu", sec / 60UL, sec % 60UL, cs);
-    centerText(130, buf, WHITE, 5);
-
-    canvas->fillRoundRect(40, 280, 200, 80, 14, stopwatchRunning ? 0xE5A0 : GREEN);
-    canvas->drawRoundRect(40, 280, 200, 80, 14, WHITE);
-    textCenterX(140, 308, stopwatchRunning ? "STOP" : "START", BLACK, 3);
-
-    canvas->fillRoundRect(250, 280, 120, 80, 14, RED);
-    canvas->drawRoundRect(250, 280, 120, 80, 14, WHITE);
-    textCenterX(310, 308, "RESET", BLACK, 3);
-  }
-
-  drawBackButton();
-}
-
-static void drawMeldeEdit() {
-  char buf[48];
-
-  if (meldeEditMode == 0) {
-    centerText(60, "MELDUNGEN", YELLOW, 3);
-    snprintf(buf, sizeof(buf), "Heute: %d", totalHeute);
-    centerText(100, buf, WHITE, 2);
-
-    canvas->fillRoundRect(40, 128, 330, 66, 14, 0x4228);
-    canvas->drawRoundRect(40, 128, 330, 66, 14, RED);
-    textCenterX(205, 149, "LETZTE LOESCHEN", WHITE, 3);
-
-    canvas->fillRoundRect(40, 204, 330, 66, 14, 0x18E3);
-    canvas->drawRoundRect(40, 204, 330, 66, 14, GREEN);
-    textCenterX(205, 225, "HINZUFUEGEN", WHITE, 3);
-
-    canvas->fillRoundRect(40, 280, 330, 66, 14, 0x18E3);
-    canvas->drawRoundRect(40, 280, 330, 66, 14, CYAN);
-    textCenterX(205, 301, "BEARBEITEN", WHITE, 3);
-
-    canvas->fillRoundRect(40, 356, 330, 66, 14, 0x4228);
-    canvas->drawRoundRect(40, 356, 330, 66, 14, RED);
-    textCenterX(205, 377, "ALLE LOESCHEN", WHITE, 3);
-
-    drawBackButton();
-    if (totalHeute <= 0) centerText(452, "Keine Meldung vorhanden", RED, 2);
-    else centerText(452, "Power = zurueck", 0x8410, 2);
-  } else if (meldeEditMode == 1) {
-    centerText(70, "LETZTE MELDUNG", YELLOW, 3);
-    snprintf(buf, sizeof(buf), "Heute: %d", totalHeute);
-    centerText(112, buf, WHITE, 2);
-
-    canvas->fillRoundRect(40, 165, 330, 95, 16, 0x18E3);
-    canvas->drawRoundRect(40, 165, 330, 95, 16, GREEN);
-    textCenterX(205, 200, "DRANGENOMMEN", WHITE, 3);
-    centerText(240, "als aufgerufen markieren", 0x8410, 2);
-
-    canvas->fillRoundRect(40, 275, 330, 95, 16, 0x4228);
-    canvas->drawRoundRect(40, 275, 330, 95, 16, CYAN);
-    textCenterX(205, 310, "FERTIG", WHITE, 3);
-    centerText(350, "nicht aufgerufen", 0x8410, 2);
-
-    drawBackButton();
-  } else {
-    centerText(70, "DRANGENOMMEN", GREEN, 3);
-    centerText(120, "Antwort war ...", WHITE, 2);
-
-    canvas->fillRoundRect(40, 180, 330, 90, 16, GREEN);
-    canvas->drawRoundRect(40, 180, 330, 90, 16, WHITE);
-    textCenterX(205, 210, "RICHTIG", BLACK, 3);
-
-    canvas->fillRoundRect(40, 290, 330, 90, 16, RED);
-    canvas->drawRoundRect(40, 290, 330, 90, 16, WHITE);
-    textCenterX(205, 320, "FALSCH", BLACK, 3);
-
-    drawBackButton();
-  }
-}
-
-// Neuzeichnen-Takt pro Screen. Screens mit Live-Daten (Arm-Zustand/Modell im
-// Melde-Screen, Timer, Test-App, Sensor-Aufnahme) brauchen 5 Hz, sonst wirken
-// sie eingefroren; alle übrigen 1 Hz (Sekundenanzeige) + sofort bei redrawNow.
-static unsigned long redrawIntervalMs() {
-  switch (screen) {
-    case 1: case 7: case 8: case 9: return 200;
-    default: return 1000;
-  }
-}
-
-static void renderAndFlush() {
-  canvas->fillScreen(BLACK);
-  if (screen == 0) {
-    drawWatchface();
-  } else if (screen == 1) {
-    if (view == 0) drawViewCounter();
-    else if (view == 1) drawViewStats();
-    else {
-      if (calibSelectOpen) drawCalibSelect();
-      else drawViewCalibration();
-    }
-    drawHomeButton();
-  } else if (screen == 2) { // Einstellungen
-    if (settingsItem == 0) drawSettingsMenu();
-    else if (settingsItem == 1) drawBrightness();
-    else if (settingsItem == 2) {
-      if (wifiPasswordMode) drawWifiPassword();
-      else drawWifi();
-    }
-    else if (settingsItem == 3) drawBluetooth();
-    else if (settingsItem == 4) drawSensor();
-    else drawMotor();
-  } else if (screen == 3) {
-    drawWfPicker();
-  } else if (screen == 6) {
-    drawMeldeEdit();
-  } else if (screen == 7) {
-    drawZeitApp();
-  } else if (screen == 8) {
-    drawTestApp();
-  } else if (screen == 9) {
-    drawSensorRec();
-  } else { // screen == 4
-    drawAppTray();
-  }
-
-  // Akku-Warnung überlagern (rote Leiste oben)
-  if (cachedPct >= 0 && cachedPct < 20) {
-    char bbuf[24];
-    snprintf(bbuf, sizeof(bbuf), "AKKU %d%%", cachedPct);
-    canvas->fillRect(0, 0, 410, 26, RED);
-    canvas->setTextSize(2);
-    canvas->setTextColor(WHITE);
-    canvas->setCursor(8, 3);
-    canvas->print(bbuf);
-  }
-
-  canvas->flush();
-}
-
-// ---------------------------------------------------------------------------
-// Touch-Verarbeitung
-// ---------------------------------------------------------------------------
-static void meldeTap(uint16_t x, uint16_t y);
-static void settingsTap(uint16_t x, uint16_t y);
-static void wfPickerTap(uint16_t x, uint16_t y);
-static void appTrayTap(uint16_t x, uint16_t y);
-static void sensorRecTap(uint16_t x, uint16_t y);
-static void meldeEditTap(uint16_t x, uint16_t y);
-static void zeitAppTap(uint16_t x, uint16_t y);
-static void testAppTap(uint16_t x, uint16_t y);
-
-static void onTap(uint16_t x, uint16_t y) {
-  USBSerial.printf("[touch] screen=%d x=%d y=%d\n", screen, x, y);
-  if (screen == 1) meldeTap(x, y);
-  else if (screen == 2) settingsTap(x, y);
-  else if (screen == 3) wfPickerTap(x, y);
-  else if (screen == 4) appTrayTap(x, y);
-  else if (screen == 6) meldeEditTap(x, y);
-  else if (screen == 7) zeitAppTap(x, y);
-  else if (screen == 8) testAppTap(x, y);
-  else if (screen == 9) sensorRecTap(x, y);
-  // screen 0 (Watchface): Tap ohne Funktion
-}
-
-static void onLongPress(uint16_t x, uint16_t y) {
-  if (screen == 1 && view == 0 && !inHomeButton(x, y)) {
-    resetAllStats();
-    showResetHint = true;
-    resetHintMs = millis();
-    USBSerial.println("Tageszaehler zurueckgesetzt.");
-  }
-}
-
-static void onVeryLongPress(uint16_t x, uint16_t y) {
-  if (screen == 0) {
-    watchfaceSel = watchface;
-    screen = 3;
-    USBSerial.println("Zifferblatt-Auswahl geoeffnet.");
-  } else {
-    onLongPress(x, y);
-  }
-}
-
-static void onSwipeUp(uint16_t x, uint16_t y) {
-  if (screen == 0) screen = 4;
-}
-
-static void onSwipeDown(uint16_t x, uint16_t y) {
-  if (screen == 3 || screen == 4) screen = 0;
-}
-
-#define SWIPE_DIST        70
-#define LONG_PRESS_MS     700
-#define WATCHFACE_HOLD_MS 2000
-
-static void handleTouch() {
-  uint16_t x, y;
-  bool down = touchRead(x, y);
-  if (down && !touchWasDown) {
-    touchWasDown = true;
-    touchHoldFired = false;
-    touchDownMs = millis();
-    touchStartX = x; touchStartY = y;
-    touchX = x; touchY = y;
-  } else if (down && touchWasDown) {
-    touchX = x; touchY = y;
-    // Watchface: nach 2 s Halten automatisch öffnen (ohne loszulassen) + kurz vibrieren
-    if (!touchHoldFired && screen == 0 && millis() - touchDownMs >= WATCHFACE_HOLD_MS) {
-      int16_t dx = (int16_t)touchX - (int16_t)touchStartX;
-      int16_t dy = (int16_t)touchY - (int16_t)touchStartY;
-      if (abs(dx) < 40 && abs(dy) < 40) {
-        touchHoldFired = true;
-        vibrate(80);
-        onVeryLongPress(touchX, touchY);
-      }
-    }
-  } else if (!down && touchWasDown) {
-    touchWasDown = false;
-    unsigned long dauer = millis() - touchDownMs;
-    int16_t dx = (int16_t)touchX - (int16_t)touchStartX;
-    int16_t dy = (int16_t)touchY - (int16_t)touchStartY;
-    bool still = (abs(dx) < 40 && abs(dy) < 40);
-
-    if (touchHoldFired) {
-      // bereits beim Halten ausgelöst -> beim Loslassen nichts mehr tun
-    } else if (dauer > WATCHFACE_HOLD_MS && still) {
-      onVeryLongPress(touchX, touchY);
-    } else if (abs(dy) > SWIPE_DIST && abs(dy) > abs(dx) && dauer < WATCHFACE_HOLD_MS) {
-      if (dy < 0) onSwipeUp(touchX, touchY);
-      else onSwipeDown(touchX, touchY);
-    } else if (dauer > LONG_PRESS_MS && still) {
-      onLongPress(touchX, touchY);
-    } else if (dauer > 60 && still) {
-      onTap(touchX, touchY);
-    }
-    redrawNow = true;   // nach jeder Geste sofort neu zeichnen
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Physische Tasten (Power + Boot)
 // ---------------------------------------------------------------------------
 // Power-Taste (GPIO10 = SYS_OUT) liest das AXP2101-IRQ-Statusregister ohne
@@ -3041,7 +1772,7 @@ static void enterDeepSleep() {
   USBSerial.flush();
   delay(100);
 
-  gfx->displayOff();
+  halDisplayPower(false);
 
   // BLE-Werbung stoppen
   if (btOn) {
@@ -3071,58 +1802,20 @@ static void enterStandby() {
   }
   standby = true;
   screen = 0;                 // beim Aufwachen auf dem Watchface landen
-  touchWasDown = false;
-  gfx->setBrightness(0);      // nur Display aus – Sensor/Motor zählen weiter
-  gfx->displayOff();          // Display-Controller in Sleep (spart mehr als nur Helligkeit 0)
+  halSetBrightness(0);        // nur Display aus – Sensor/Motor zählen weiter
+  halDisplayPower(false);     // Display-Controller in Sleep (spart mehr als nur Helligkeit 0)
   USBSerial.println("[power] Standby (Display aus, Zaehlung laeuft weiter)");
 }
 
 static void wakeFromStandby() {
   standby = false;
-  gfx->displayOn();
-  gfx->setBrightness(brightness);
+  halDisplayPower(true);
+  halSetBrightness(brightness);
+  uiInvalidateAll();          // Panel-RAM nach dem Sleep neu beschreiben
   USBSerial.println("[power] Aufgewacht");
 }
 
-static void powerBack() {
-  if (alarmActive) {
-    alarmStop();
-    zeitTab = 0;
-    screen = 4;
-    return;
-  }
-  if (screen == 0) {
-    enterStandby();
-  } else if (screen == 1) {
-    if (view == 2 && calibSelectOpen) {
-      calibSelectOpen = false;
-      return;
-    }
-    screen = 0;
-  } else if (screen == 2) {
-    if (wifiPasswordMode) {
-      wifiPasswordMode = 0;
-      return;
-    }
-    if (settingsItem == 0) screen = 0;
-    else settingsItem = 0;
-  } else if (screen == 3) {
-    screen = 0;
-  } else if (screen == 4) {
-    screen = 0;
-  } else if (screen == 6) {
-    if (meldeEditMode == 2) meldeEditMode = 1;
-    else if (meldeEditMode == 1) meldeEditMode = 0;
-    else screen = 0;
-  } else if (screen == 7) {
-    screen = 4;
-  } else if (screen == 8) {
-    screen = 4;
-  } else if (screen == 9) {
-    if (sensorRec) stopSensorRec();
-    screen = 4;
-  }
-}
+// powerBack(): Navigation, siehe ui_ctl.h
 
 static void powerShortPress() {
   if (standby) {
@@ -3153,10 +1846,7 @@ static void bootDoublePress() {
   }
   if (standby) wakeFromStandby();
 
-  canvas->fillScreen(BLACK);
-  centerText(200, "TISCH neu kalibrieren", WHITE, 2);
-  centerText(250, "Uhr liegt auf dem Tisch ...", CYAN, 2);
-  canvas->flush();
+  uiMessage(LV_SYMBOL_HOME, lv_color_hex(0x64D2FF), "Tisch lernen", "Uhr liegt flach auf dem Tisch …");
 
   vibrateBlocking(100);
   delay(500);                        // kurz ruhen lassen
@@ -3179,9 +1869,7 @@ static void bootDoublePress() {
 
   vibrateBlocking(VIB_SCHRITT_MS);   // längere Bestätigung
 
-  canvas->fillScreen(BLACK);
-  centerText(230, "TISCH gespeichert!", GREEN, 3);
-  canvas->flush();
+  uiMessage(LV_SYMBOL_OK, lv_color_hex(0x30D158), "Gespeichert", "Tisch-Lage gelernt.");
   delay(1200);
 
   screen = 0;                        // zurück zum Watchface
@@ -3199,7 +1887,6 @@ static void handleButtons() {
     pmu.getIrqStatus();
     if (pmu.isPekeyShortPressIrq()) {
       pmu.clearIrqStatus();
-      redrawNow = true;
       powerShortPress();
     }
   }
@@ -3215,7 +1902,6 @@ static void handleButtons() {
     if (d >= 30 && d < 1500) {
       if (bootDoublePending && (now - bootFirstPressMs) <= BOOT_DOUBLE_MS) {
         bootDoublePending = false;
-        redrawNow = true;
         bootDoublePress();
       } else {
         bootDoublePending = true;
@@ -3227,7 +1913,6 @@ static void handleButtons() {
   // Einzel-Klick ausführen, wenn kein zweiter Klick folgt
   if (bootDoublePending && (now - bootFirstPressMs) > BOOT_DOUBLE_MS) {
     bootDoublePending = false;
-    redrawNow = true;
     bootPress();
   }
 }
@@ -3249,326 +1934,6 @@ static void updateZeitApp() {
     USBSerial.println("[zeit] Timer abgelaufen");
   } else {
     timerRemainingMs -= d;
-  }
-}
-
-static void wfPickerTap(uint16_t x, uint16_t y) {
-  if (inBackButton(x, y)) { screen = 0; return; }
-  for (int i = 0; i < 6; i++) {
-    if (inRect(x, y, 40, 100 + i * 56, 330, 50)) {
-      watchface = i;
-      prefs.putInt("wf", i);
-      screen = 0;
-      USBSerial.printf("Watchface gewechselt: %s\n", WF_NAMES[i]);
-      return;
-    }
-  }
-}
-
-static void appTrayTap(uint16_t x, uint16_t y) {
-  if (inBackButton(x, y)) { screen = 0; return; }
-  if (inRect(x, y, 40, 100, 160, 120)) {
-    screen = 1;
-    bufHead = bufCount = 0;
-  } else if (inRect(x, y, 210, 100, 160, 120)) {
-    screen = 2;
-    settingsItem = 0;
-  } else if (inRect(x, y, 40, 230, 160, 120)) {
-    screen = 7;
-    zeitTab = 0;
-  } else if (inRect(x, y, 210, 230, 160, 120)) {
-    screen = 9;
-  } else if (inRect(x, y, 40, 360, 330, 72)) {
-    screen = 8;
-  }
-}
-
-static void testAppTap(uint16_t x, uint16_t y) {
-  if (inBackButton(x, y)) { screen = 4; return; }
-  if (inRect(x, y, 40, 100, 330, 64)) {
-    vibrate(300);
-    snprintf(testInfo, sizeof(testInfo), "Motor: 300ms");
-    testInfoMs = millis();
-  } else if (inRect(x, y, 40, 175, 330, 64)) {
-    snprintf(testInfo, sizeof(testInfo), "Sensor-Daten oben");
-    testInfoMs = millis();
-  } else if (inRect(x, y, 40, 250, 330, 64)) {
-    snprintf(testInfo, sizeof(testInfo), "Akku-Daten oben");
-    testInfoMs = millis();
-  }
-}
-
-static void sensorRecTap(uint16_t x, uint16_t y) {
-  if (inBackButton(x, y)) {
-    if (sensorRec) stopSensorRec();
-    screen = 4;
-    return;
-  }
-  if (sensorRec) {
-    if (inRect(x, y, 40, 210, 330, 120)) stopSensorRec();
-    return;
-  }
-  const char *labels[2] = {"meldung", "nicht_meldung"};
-  for (int i = 0; i < 2; i++) {
-    if (inRect(x, y, 40, 160 + i * 110, 330, 90)) {
-      startSensorRec(labels[i]);
-      return;
-    }
-  }
-}
-
-static void calibSelectTap(uint16_t x, uint16_t y) {
-  if (inBackButton(x, y)) {
-    calibSelectOpen = false;
-    return;
-  }
-  for (int i = 0; i < 6; i++) {
-    int ry = 96 + i * 56;
-    if (inRect(x, y, 40, ry, 330, 50)) {
-      if (i == 5) {
-        // Kalibrierung loeschen und neu starten -> Erst-Kalibrierung beim naechsten Boot
-        calibSelectOpen = false;
-        clearCalibration();
-        USBSerial.println("Kalibrierung geloescht, Neustart ...");
-        USBSerial.flush();
-        delay(200);
-        ESP.restart();
-        return;
-      }
-      calibSelectOpen = false;
-      if (i == 0) runCalibration();          // alles
-      else runCalibrationPart(i);            // 1=N, 2=H, 3=NICHT MELDEN, 4=TISCH
-      view = 2;
-      calibSelectOpen = true;                // zurück zur Auswahl
-      return;
-    }
-  }
-}
-
-static void meldeTap(uint16_t x, uint16_t y) {
-  if (inHomeButton(x, y)) { screen = 0; return; }
-  if (view == 2) {
-    if (calibSelectOpen) {
-      calibSelectTap(x, y);
-    } else if (inRect(x, y, CALIB_START_X, CALIB_START_Y, CALIB_START_W, CALIB_START_H)) {
-      calibSelectOpen = true;
-      USBSerial.println("Kalibrier-Auswahl geoeffnet.");
-    } else {
-      view = (view + 1) % 3;  // zurück zum Zähler (Tippen wechselt die Ansicht)
-    }
-  } else {
-    view = (view + 1) % 3;
-  }
-}
-
-static void meldeEditTap(uint16_t x, uint16_t y) {
-  if (inBackButton(x, y)) {
-    if (meldeEditMode == 2) meldeEditMode = 1;
-    else if (meldeEditMode == 1) meldeEditMode = 0;
-    else screen = 0;
-    return;
-  }
-
-  if (meldeEditMode == 0) {
-    if (inRect(x, y, 40, 128, 330, 66)) {
-      removeLastMeldung();
-    } else if (inRect(x, y, 40, 204, 330, 66)) {
-      registerMeldung();
-      meldeEditMode = 1;
-      USBSerial.println("Meldung hinzugefuegt -> bearbeiten.");
-    } else if (inRect(x, y, 40, 280, 330, 66)) {
-      if (totalHeute > 0) {
-        meldeEditMode = 1;
-      } else {
-        showResetHint = true;
-        resetHintMs = millis();
-        USBSerial.println("Keine Meldung zum Bearbeiten.");
-      }
-    } else if (inRect(x, y, 40, 356, 330, 66)) {
-      resetAllStats();
-      showResetHint = true;
-      resetHintMs = millis();
-    }
-  } else if (meldeEditMode == 1) {
-    if (inRect(x, y, 40, 165, 330, 95)) {
-      drange++;
-      saveMeldeExtras();
-      meldeEditMode = 2;
-      USBSerial.println("Drangenommen +1");
-    } else if (inRect(x, y, 40, 275, 330, 95)) {
-      // nicht aufgerufen -> fertig, zurueck zum Watchface
-      meldeEditMode = 0;
-      screen = 0;
-      USBSerial.println("Fertig (nicht aufgerufen).");
-    }
-  } else if (meldeEditMode == 2) {
-    if (inRect(x, y, 40, 180, 330, 90)) {
-      richtig++;
-      saveMeldeExtras();
-      meldeEditMode = 0;
-      USBSerial.println("Richtig +1");
-    } else if (inRect(x, y, 40, 290, 330, 90)) {
-      falsch++;
-      saveMeldeExtras();
-      meldeEditMode = 0;
-      USBSerial.println("Falsch +1");
-    }
-  }
-}
-
-static void zeitAppTap(uint16_t x, uint16_t y) {
-  if (zeitTab == 2) {
-    // Alarm läuft: nur STOPPEN beendet ihn
-    if (inRect(x, y, 40, 300, 330, 90)) {
-      alarmStop();
-      zeitTab = 0;
-    }
-    return;
-  }
-
-  if (inBackButton(x, y)) { screen = 4; return; }
-
-  // Tabs
-  if (inRect(x, y, 40, 40, 160, 45)) { zeitTab = 0; return; }
-  if (inRect(x, y, 210, 40, 160, 45)) { zeitTab = 1; return; }
-
-  if (zeitTab == 0) {
-    // RESET (immer sichtbar)
-    if (inRect(x, y, 250, 260, 120, 80)) {
-      timerRemainingMs = timerSetMs;
-      timerRunning = false;
-      return;
-    }
-    if (timerRunning) {
-      if (inRect(x, y, 40, 260, 200, 80)) {   // PAUSE
-        timerRunning = false;
-        return;
-      }
-    } else {
-      // Einstell-Buttons
-      if (inRect(x, y, 40, 195, 70, 50)) {
-        if (timerSetMs >= 60000UL) timerSetMs -= 60000UL;
-        timerRemainingMs = timerSetMs;
-        return;
-      }
-      if (inRect(x, y, 120, 195, 70, 50)) {
-        if (timerSetMs <= (99UL * 60000UL)) timerSetMs += 60000UL;
-        timerRemainingMs = timerSetMs;
-        return;
-      }
-      if (inRect(x, y, 220, 195, 70, 50)) {
-        if (timerSetMs >= 10000UL) timerSetMs -= 10000UL;
-        timerRemainingMs = timerSetMs;
-        return;
-      }
-      if (inRect(x, y, 300, 195, 70, 50)) {
-        if (timerSetMs <= (99UL * 60000UL + 59000UL)) timerSetMs += 10000UL;
-        timerRemainingMs = timerSetMs;
-        return;
-      }
-      if (inRect(x, y, 40, 260, 200, 80)) {   // START
-        if (timerRemainingMs == 0) timerRemainingMs = timerSetMs;
-        timerRunning = true;
-        timerLastMs = millis();
-        return;
-      }
-    }
-  } else {
-    // Stoppuhr
-    if (inRect(x, y, 250, 280, 120, 80)) {     // RESET
-      stopwatchRunning = false;
-      stopwatchBaseMs = 0;
-      return;
-    }
-    if (inRect(x, y, 40, 280, 200, 80)) {      // START / STOP
-      if (stopwatchRunning) {
-        stopwatchBaseMs += millis() - stopwatchStartMs;
-        stopwatchRunning = false;
-      } else {
-        stopwatchStartMs = millis();
-        stopwatchRunning = true;
-      }
-      return;
-    }
-  }
-}
-
-static void wifiPasswordTap(uint16_t x, uint16_t y) {
-  if (inBackButton(x, y)) { wifiPasswordMode = 0; return; }
-  for (int r = 0; r < 4; r++) {
-    for (int c = 0; c < 3; c++) {
-      int idx = r * 3 + c;
-      int bx = 40 + c * 115, by = 190 + r * 60;
-      if (!inRect(x, y, bx, by, 100, 52)) continue;
-
-      if (idx < 9) {                    // Ziffer 1..9
-        if (wifiPass.length() < 20) wifiPass += (char)('1' + idx);
-      } else if (idx == 9) {            // DEL
-        if (wifiPass.length() > 0) wifiPass.remove(wifiPass.length() - 1, 1);
-      } else if (idx == 10) {           // 0
-        if (wifiPass.length() < 20) wifiPass += '0';
-      } else {                          // OK
-        String ssid = wifiTargetSSID;
-        wifiPasswordMode = 0;
-        wifiConnect(ssid);
-      }
-      return;
-    }
-  }
-}
-
-static void settingsTap(uint16_t x, uint16_t y) {
-  if (inHomeButton(x, y)) { screen = 0; return; }
-
-  if (settingsItem == 0) {
-    if (inRect(x, y, 40, 118, 330, 60)) settingsItem = 1;
-    else if (inRect(x, y, 40, 186, 330, 60)) settingsItem = 2;
-    else if (inRect(x, y, 40, 254, 330, 60)) settingsItem = 3;
-    else if (inRect(x, y, 40, 322, 330, 60)) settingsItem = 4;
-    else if (inRect(x, y, 40, 390, 330, 60)) settingsItem = 5;
-  } else if (settingsItem == 1) {
-    if (inBackButton(x, y)) settingsItem = 0;
-    else if (inRect(x, y, 60, 360, 100, 70)) { brightness -= 20; if (brightness < 10) brightness = 10; applyBrightness(); }
-    else if (inRect(x, y, 250, 360, 100, 70)) { brightness += 20; if (brightness > 255) brightness = 255; applyBrightness(); }
-  } else if (settingsItem == 2) {
-    if (wifiPasswordMode) { wifiPasswordTap(x, y); return; }
-    if (inBackButton(x, y)) settingsItem = 0;
-    else if (inRect(x, y, 40, 145, 190, 42)) wifiScanNow();
-    else if (inRect(x, y, 240, 145, 130, 42)) WiFi.disconnect();
-    else if (inRect(x, y, 190, 445, 60, 40)) { if (wifiOffset > 0) wifiOffset--; }
-    else if (inRect(x, y, 260, 445, 60, 40)) { if (wifiOffset < wifiCount - 4) wifiOffset++; }
-    else {
-      for (int r = 0; r < 4; r++) {
-        int idx = wifiOffset + r;
-        if (idx >= wifiCount) break;
-        if (inRect(x, y, 40, 205 + r * 52, 330, 46)) {
-          if (wifiAuth[idx] == WIFI_AUTH_OPEN) {
-            wifiPass = "";
-            wifiConnect(wifiSSIDs[idx]);
-          } else {
-            wifiTargetSSID = wifiSSIDs[idx];
-            wifiPass = "";
-            wifiCursor = 0;
-            wifiPasswordMode = 1;
-          }
-          break;
-        }
-      }
-    }
-  } else if (settingsItem == 3) {
-    if (inBackButton(x, y)) settingsItem = 0;
-    else if (inRect(x, y, 60, 300, 120, 70)) btEnable();
-    else if (inRect(x, y, 230, 300, 120, 70)) btDisable();
-  } else if (settingsItem == 4) {
-    if (inBackButton(x, y)) settingsItem = 0;
-    else if (inRect(x, y, 60, 300, 120, 70)) setSensorOn(true);
-    else if (inRect(x, y, 230, 300, 120, 70)) setSensorOn(false);
-  } else if (settingsItem == 5) {
-    if (inBackButton(x, y)) settingsItem = 0;
-    else if (inRect(x, y, 60, 122, 120, 60)) setMotorOn(true);
-    else if (inRect(x, y, 230, 122, 120, 60)) setMotorOn(false);
-    else if (inRect(x, y, 60, 242, 120, 60)) setMuteInLessons(true);
-    else if (inRect(x, y, 230, 242, 120, 60)) setMuteInLessons(false);
   }
 }
 
