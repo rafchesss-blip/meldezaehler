@@ -10,13 +10,13 @@
 # Mit PORT=/dev/ttyACM0 kann ein fester Port erzwungen werden.
 #
 # Voraussetzungen: arduino-cli + esp32-Core, Flutter SDK.
+# Bibliotheken einmalig: python3 setup_libs.py && ./patch_tflite_lib.sh
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
 # Waveshare ESP32-S3-Touch-AMOLED-2.06: 16 MB Flash + 8 MB OPI-PSRAM.
-# Mit der Standard-4-MB-Partition waere die Firmware zu 99% voll und der
-# Rekorder (PSRAM-Puffer) wuerde nicht funktionieren.
+# Die Firmware (LVGL, Schriften, CNN) braucht die 3-MB-App-Partition.
 FQBN="${FQBN:-esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi}"
 SKETCH="UhrMeldezaehler"
 
@@ -36,7 +36,13 @@ detect_port() {
   return 1
 }
 
+# lv_conf.h muss neben der lvgl-Bibliothek liegen (siehe setup_libs.py)
+sync_lv_conf() {
+  python3 setup_libs.py --conf-only 2>/dev/null || python setup_libs.py --conf-only
+}
+
 build_firmware() {
+  sync_lv_conf
   echo "==> Kompiliere Firmware (${FQBN}) ..."
   arduino-cli compile --fqbn "${FQBN}" "${SKETCH}"
 
@@ -60,6 +66,7 @@ upload_firmware() {
     echo "FEHLER: Keine Uhr gefunden. Port mit PORT=/dev/ttyACM0 angeben." >&2
     exit 1
   fi
+  sync_lv_conf
   echo "==> Kompiliere + flashe Firmware (${FQBN}) auf ${port} ..."
   arduino-cli compile --fqbn "${FQBN}" "${SKETCH}"
   arduino-cli upload  --fqbn "${FQBN}" -p "${port}" "${SKETCH}"

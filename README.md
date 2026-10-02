@@ -11,7 +11,17 @@ Statistiken sowie den Stundenplan an.
 Meldezähler/
 ├── UhrMeldezaehler/           Firmware für die Uhr (Arduino, ESP32-S3)
 │   ├── UhrMeldezaehler.ino    setup() + loop()
-│   ├── UhrMeldezaehler_core.h gesamte App-Logik (UI, Sensor, BLE)
+│   ├── UhrMeldezaehler_core.h Logik: Sensor, Erkennung, Kalibrierung, BLE, Tasten
+│   ├── hal_display.h          Display (esp_lcd, DMA) + LVGL-Anbindung
+│   ├── esp_lcd_sh8601.c/.h    Panel-Treiber CO5300 (aus dem Waveshare-BSP)
+│   ├── ui_ctl.h               Bedien-Logik: Navigation, Timer, Stoppuhr, …
+│   ├── ui.h, ui_screens.h,    Oberfläche (LVGL 9.3): Masken, Zifferblätter,
+│   │   ui_watchfaces.h,       Gestaltung
+│   │   ui_theme.h
+│   └── src/fonts/             Schriften mit Umlauten (tools/fonts.sh)
+├── lv_conf.h                  LVGL-Konfiguration (wird neben lvgl kopiert)
+├── setup_libs.py              Arduino-Bibliotheken + lv_conf.h einrichten
+├── tools/ui_sim/              Host-Simulator der Oberfläche (Screenshots, Abläufe)
 ├── MeldeApp/                  Flutter-Begleit-App (Android)
 ├── meldedaten/                aufgenommene Trainingsdaten (CSV)
 ├── trainieren.py              Training Meldebewegung (RandomForest/LogReg)
@@ -34,12 +44,20 @@ Meldezähler/
   - AXP2101 (PMU) → Akku
   - PCF85063 (RTC) → Uhrzeit
   - Vibrationsmotor an GPIO18
-  - Vibrationsmotor an GPIO18
 
 ## Firmware bauen & flashen
 
-Voraussetzungen: `arduino-cli`, ESP32-Core (`esp32:esp32`), Bibliotheken
-`Arduino_GFX_Library`, `XPowersLib` und `TensorFlowLite_ESP32`.
+Voraussetzungen: `arduino-cli`, ESP32-Core (`esp32:esp32` 3.x), Bibliotheken
+`lvgl` 9.3.0, `XPowersLib` und `TensorFlowLite_ESP32`. Einmalig einrichten:
+
+```bash
+python3 setup_libs.py      # installiert die Bibliotheken, kopiert lv_conf.h neben lvgl
+./patch_tflite_lib.sh      # s. u.
+```
+
+> LVGL liest seine Konfiguration nur aus `lv_conf.h` **neben** dem
+> `lvgl`-Bibliotheksordner. `build.sh` gleicht diese Datei vor jedem Build mit
+> der versionierten `lv_conf.h` ab.
 
 > **TensorFlowLite_ESP32 patchen:** Die Bibliothek braucht zwei kleine Patches,
 > um mit dem ESP32-Core 3.x / GCC 14 zu kompilieren. Einmalig ausführen:
@@ -62,10 +80,19 @@ arduino-cli upload  --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=hu
 > `PORT=/dev/ttyACM0 ./build.sh firmware`. Ohne angeschlossene Uhr wird nur
 > kompiliert.
 
-> **Wichtig:**
-> - Mit der Standard-4-MB-Partition wäre die Firmware zu **99 % voll** und
->   Deshalb immer `FlashSize=16M`, `PartitionScheme=huge_app` (3 MB APP)
->   und `PSRAM=opi` verwenden.
+> **Wichtig:** Immer `FlashSize=16M`, `PartitionScheme=huge_app` (3 MB App)
+> und `PSRAM=opi` verwenden – die Firmware (LVGL, Schriften, CNN) passt nicht
+> in die Standard-Partition.
+
+### Display-Anbindung und Rückfallebene
+
+Das Display wird über `esp_lcd` (Quad-SPI mit DMA) angesteuert; LVGL rendert in
+zwei Teilpuffer und überträgt nur geänderte Flächen, während `loop()`
+weiterläuft. Bleibt der Bildschirm nach dem Flashen schwarz, in
+`UhrMeldezaehler/hal_display.h` `#define USE_ESP_LCD 0` setzen: dann überträgt
+LVGL über Arduino_GFX (langsamer, Bibliothek `GFX Library for Arduino` nötig).
+Im seriellen Log zeigt `[perf] max loop=… max ui=…` alle 5 s die längste
+Schleifendauer und Render-Zeit.
 
 ### Serielle Befehle (USB, 115200 Baud)
 
@@ -81,11 +108,42 @@ arduino-cli upload  --fqbn "esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=hu
 | `TT` | Stundenplan ausgeben |
 | `RESTORE …` | Kalibrierung wiederherstellen |
 | `VIB` | Vibrationstest |
-| – (Audio-Funktionen entfernt) | spart Akku |
+| `BATT` | Akku-Diagnose (Spannung, Ladezustand) |
+| `BTN` | Zustand der Power-Taste (GPIO10) |
+| `SLEEP` | sofort in den Deep-Sleep |
 | `STREAM` / `STOPSTREAM` | Rohdaten-Stream für PC-Training (100 Hz, rotiert, g/dps) |
 | `SENSOR` / `SENSOR ON` / `SENSOR OFF` | Erkennung anzeigen / ein- / ausschalten |
 | `RECSD <klasse>` / `STOPSD` | Sensor-Aufnahme auf SD starten/stoppen (`meldung`/`nicht_meldung`) |
 | `SDCHECK` | Größe + erste Zeilen von `/aufnahme.csv` anzeigen |
+
+## Bedienung der Uhr
+
+| Wo | Geste / Taste | Wirkung |
+|----|---------------|---------|
+| Zifferblatt | nach oben wischen | Apps |
+| Zifferblatt | 2 s halten (vibriert) | Zifferblatt wählen (6 Stück) |
+| überall | **Power** kurz | zurück (wie ‹); auf dem Zifferblatt: Standby |
+| überall | **BOOT** 1× | Meldungen bearbeiten (hinzufügen, drangenommen, richtig/falsch, löschen) |
+| überall | **BOOT** 2× | Tisch-Lage neu lernen (Uhr liegt flach) |
+| Apps / Auswahl | nach unten wischen | Zifferblatt |
+| Melden | seitlich wischen | Zähler · Statistik · Kalibrierung |
+| Melden (Zähler) | lange drücken | Tageszählung zurücksetzen (mit Rückfrage) |
+
+Apps: **Melden**, **Zeit** (Timer, Stoppuhr), **Einstellungen** (Helligkeit,
+Bluetooth, Sensor, Vibration, Stumm im Unterricht), **Aufnahme**
+(Trainingsdaten auf SD), **Test** (Motor, Sensor, Akku). Zurück aus einer App
+führt zu den Apps, von dort zum Zifferblatt. Löschen fragt immer nach.
+
+### Oberfläche ohne Uhr testen
+
+```bash
+tools/ui_sim/build.sh     # baut LVGL + Simulator, schreibt tools/ui_sim/out/*.png
+```
+
+Der Simulator übersetzt dieselben `ui*.h`-Dateien gegen eine Stub-Logik
+(`tools/ui_sim/sim_model.h`), rendert jede Maske als PNG und spielt
+Touch-Abläufe durch (`sim_main.cpp`); er endet mit „ALLES OK“ oder listet die
+Abweichungen. Schriften neu erzeugen: `LVGL_DIR=<lvgl> tools/fonts.sh`.
 
 ## Flutter-App bauen
 
@@ -200,10 +258,10 @@ python3 konvertiere_cnn_tflite.py meldedaten/uhr_positionen.csv  # auch CNN_MEAN
 
 Die Uhr kann Trainingsdaten auch **allein** auf die SD-Karte aufnehmen:
 
-1. Auf der Uhr: `Apps` → Kachel **`SENSOR-AUFNAHME`**.
-2. Klasse antippen: `MELDUNG` oder `NICHT MELDEN`.
+1. Auf der Uhr: Apps → **Aufnahme**.
+2. Klasse antippen: **Meldung** oder **Nicht melden**.
 3. Es wird sofort auf die SD-Karte (`/aufnahme.csv`) geschrieben – so lange,
-   bis du **`STOPPEN`** (oder die Zurück-Taste) drückst.
+   bis du **Stoppen** (oder Zurück/Power) drückst.
 4. SD-Karte in den PC stecken, `/aufnahme.csv` nach `meldedaten/` kopieren
    und trainieren:
 

@@ -205,9 +205,13 @@ void loop() {
   // 4) Oberfläche: Navigation + LVGL (Touch lesen, geänderte Flächen zeichnen).
   //    Im Standby/Streaming ruht die Oberfläche; Touch wird dann nicht gelesen.
   ctlProcessPending();
+  static unsigned long uiMaxUs = 0;
   if (!standby && !streamMode) {
+    unsigned long u0 = micros();
     uiSync();
     lv_timer_handler();
+    unsigned long du = micros() - u0;
+    if (du > uiMaxUs) uiMaxUs = du;
   }
 
   // 4b) BLE-Befehle aus der App abarbeiten (im Bluetooth-Task nur eingereiht)
@@ -236,8 +240,9 @@ void loop() {
     if (d > loopMaxUs) loopMaxUs = d;
     if (nowMs - loopReportMs > 5000) {
       loopReportMs = nowMs;
-      USBSerial.printf("[perf] max loop=%lu us\n", loopMaxUs);
+      USBSerial.printf("[perf] max loop=%lu us  max ui=%lu us\n", loopMaxUs, uiMaxUs);
       loopMaxUs = 0;
+      uiMaxUs = 0;
     }
   }
 }
