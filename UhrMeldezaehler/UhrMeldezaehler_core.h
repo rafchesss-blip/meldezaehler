@@ -1191,9 +1191,65 @@ static void cnnInit() {
 
 // CNN-Inferenz: 1,5-s-Fenster (150 Samples x 6 Kanäle) aus dem Ringpuffer,
 // rotiert ins Trainings-Koordinatensystem, standardisiert und int8-quantisiert.
-static int predictClassCNN(float prob[2]) {
+// Die Inferenz dauert ~300–420 ms (TFLite-Referenzkernel). Synchron in loop()
+// blockierte sie alle 0,5 s Touch, Anzeige und Tasten (gemessen 02.10.2026).
+// Deshalb läuft Invoke() in einem eigenen Task auf Kern 0; loop() (Kern 1)
+// füllt nur das Eingabefenster und übernimmt das jeweils fertige Ergebnis.
+// Folge: das Ergebnis gehört zum Fenster der vorigen Auswertung (0,5 s älter).
+static TaskHandle_t cnnTask = nullptr;
+static volatile bool cnnBusy = false;        // Task rechnet; Eingabetensor nicht anfassen
+static volatile bool cnnResultReady = false;
+static volatile int cnnResClass = 1;
+static float cnnResProb[2] = {0, 1};
+static volatile unsigned long cnnAvgUs = 0;   // Mittel über 20 Läufe, für [perf]
+
+static void cnnWorker(void *) {
+  unsigned long acc = 0;
+  int n = 0;
+  for (;;) {
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+    unsigned long t0 = micros();
+    bool ok = cnnInterp->Invoke() == kTfLiteOk;
+    acc += micros() - t0;
+    if (++n >= 20) {
+      cnnAvgUs = acc / n;
+      acc = 0;
+      n = 0;
+    }
+    float p[2] = {0.0f, 1.0f};
+    if (ok) {
+      const float outScale = cnnOutput->params.scale;
+      const int outZero = cnnOutput->params.zero_point;
+      const int nOut = (cnnOutput->dims->size >= 2) ? cnnOutput->dims->data[1] : 1;
+      p[0] = p[1] = 0.0f;
+      for (int i = 0; i < nOut && i < 2; i++) p[i] = (cnnOutput->data.int8[i] - outZero) * outScale;
+    }
+    cnnResProb[0] = p[0];
+    cnnResProb[1] = p[1];
+    cnnResClass = (ok && p[0] >= p[1]) ? 0 : 1;   // Fehler -> sicher NICHT-MELDEN
+    __sync_synchronize();                          // Ergebnis vor den Flags sichtbar machen
+    cnnResultReady = true;
+    cnnBusy = false;
+  }
+}
+
+// Liefert das zuletzt fertige Ergebnis (fresh = neu seit dem letzten Aufruf)
+// und startet, wenn der Task frei ist, die Auswertung des aktuellen Fensters.
+static int predictClassCNN(float prob[2], bool &fresh) {
+  fresh = false;
   cnnInit();
   if (!cnnOk) return 1;   // sicherer Fallback: NICHT-MELDEN
+  if (!cnnTask) xTaskCreatePinnedToCore(cnnWorker, "cnn", 8192, nullptr, 1, &cnnTask, 0);
+  if (cnnBusy) return aktuellKlasse;
+
+  if (cnnResultReady) {
+    __sync_synchronize();
+    prob[0] = cnnResProb[0];
+    prob[1] = cnnResProb[1];
+    cnnResultReady = false;
+    fresh = true;
+  }
+  int klasse = fresh ? cnnResClass : aktuellKlasse;
 
   const int start = (bufHead - FENSTER + BUF_N) % BUF_N;
   const float inScale = cnnInput->params.scale;
@@ -1215,27 +1271,10 @@ static int predictClassCNN(float prob[2]) {
       cnnInput->data.int8[t * 6 + c] = (int8_t)q;
     }
   }
-
-  unsigned long inv0 = micros();
-  if (cnnInterp->Invoke() != kTfLiteOk) return 1;
-
-  {
-    static unsigned long cnnAcc = 0; static int cnnN = 0;
-    cnnAcc += micros() - inv0; cnnN++;
-    if (cnnN >= 20) {
-      USBSerial.printf("[perf] CNN avg=%lu us\n", cnnAcc / cnnN);
-      cnnAcc = 0; cnnN = 0;
-    }
-  }
-
-  const float outScale = cnnOutput->params.scale;
-  const int outZero = cnnOutput->params.zero_point;
-  const int nOut = (cnnOutput->dims->size >= 2) ? cnnOutput->dims->data[1] : 1;
-  for (int i = 0; i < 2; i++) prob[i] = 0.0f;
-  for (int i = 0; i < nOut && i < 2; i++)
-    prob[i] = (cnnOutput->data.int8[i] - outZero) * outScale;
-
-  return prob[0] >= prob[1] ? 0 : 1;
+  __sync_synchronize();
+  cnnBusy = true;
+  xTaskNotifyGive(cnnTask);
+  return klasse;
 }
 #endif
 
@@ -1334,8 +1373,14 @@ static void evaluate() {
 
   // Langes Fenster -> Modell (im Trainings-Koordinatensystem)
 #if USE_CNN
-  aktuellKlasse = predictClassCNN(aktuellProb);
+  bool cnnFresh = false;
+  aktuellKlasse = predictClassCNN(aktuellProb, cnnFresh);
+  if (cnnAvgUs) {
+    USBSerial.printf("[perf] CNN avg=%lu us (Kern 0)\n", (unsigned long)cnnAvgUs);
+    cnnAvgUs = 0;
+  }
 #else
+  const bool cnnFresh = true;
   Stats lang = computeStats(FENSTER);
   Vec3 mSensor = {lang.mx, lang.my, lang.mz};
   Vec3 mRot;
@@ -1366,8 +1411,11 @@ static void evaluate() {
   } else {
     // Modell beobachten: wenn während "oben" überwiegend NICHT-MELDEN
     // erkannt wird, zählt es nicht (z. B. Kopfkratzen, Winken, kleine Bewegungen).
-    if (aktuellKlasse == 0) hochMeldungCount++;
-    else hochNichtCount++;
+    // nur neue Modellergebnisse zählen (CNN rechnet asynchron, s. predictClassCNN)
+    if (cnnFresh) {
+      if (aktuellKlasse == 0) hochMeldungCount++;
+      else hochNichtCount++;
+    }
 
     if (aktuellScore < LEAVE_HOCH) {
       unsigned long dauer = now - hochSeitMs;
@@ -2005,6 +2053,10 @@ static void handleSerial() {
           pinMode(PWR_KEY_PIN, INPUT);
           USBSerial.printf("Power-Taste (GPIO%d): %s\n", PWR_KEY_PIN,
                            digitalRead(PWR_KEY_PIN) ? "HIGH (gedrueckt)" : "LOW (losgelassen)");
+        } else if (line.startsWith("SCREEN ")) {
+          // Maske direkt öffnen (Messung der Renderzeit ohne Bedienung)
+          screen = line.substring(7).toInt();
+          USBSerial.printf("screen=%d\n", screen);
         } else if (line == "SLEEP") {
           enterDeepSleep();
         } else if (line == "SENSOR") {

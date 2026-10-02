@@ -18,6 +18,8 @@ cd "$(dirname "$0")"
 # Waveshare ESP32-S3-Touch-AMOLED-2.06: 16 MB Flash + 8 MB OPI-PSRAM.
 # Die Firmware (LVGL, Schriften, CNN) braucht die 3-MB-App-Partition.
 FQBN="${FQBN:-esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=huge_app,PSRAM=opi}"
+# -O2 statt -Os: Rendern und CNN ~30 % schneller (gemessen 02.10.2026)
+OPT=(--build-property "compiler.optimization_flags=-O2")
 SKETCH="UhrMeldezaehler"
 
 # Port automatisch finden: PORT-Env hat Vorrang, sonst erstes /dev/ttyACM* bzw. /dev/ttyUSB*.
@@ -44,7 +46,7 @@ sync_lv_conf() {
 build_firmware() {
   sync_lv_conf
   echo "==> Kompiliere Firmware (${FQBN}) ..."
-  arduino-cli compile --fqbn "${FQBN}" "${SKETCH}"
+  arduino-cli compile "${OPT[@]}" --fqbn "${FQBN}" "${SKETCH}"
 
   local port
   if port="$(detect_port)"; then
@@ -68,7 +70,7 @@ upload_firmware() {
   fi
   sync_lv_conf
   echo "==> Kompiliere + flashe Firmware (${FQBN}) auf ${port} ..."
-  arduino-cli compile --fqbn "${FQBN}" "${SKETCH}"
+  arduino-cli compile "${OPT[@]}" --fqbn "${FQBN}" "${SKETCH}"
   arduino-cli upload  --fqbn "${FQBN}" -p "${port}" "${SKETCH}"
 }
 

@@ -15,6 +15,11 @@ enum {
   UI_EDIT = 6, UI_ZEIT = 7, UI_TEST = 8, UI_REC = 9, UI_ALARM = 10, UI_COUNT = 11
 };
 
+// Dauer der Übergangsanimation; jedes Bild davon ist ein Vollbild-Rendern
+#ifndef UI_ANIM_MS
+#define UI_ANIM_MS 180
+#endif
+
 static lv_obj_t *uiScr[UI_COUNT];
 static int uiShown = -1;          // aktuell geladene Maske (UI_*), -1 = modal/keine
 static int uiWfBuilt = -1;        // für welches Zifferblatt uiScr[UI_WF] gebaut ist
@@ -166,7 +171,8 @@ static void uiSync() {
     else if (uiDepth(k) < uiDepth(from)) anim = LV_SCR_LOAD_ANIM_MOVE_RIGHT;
     else anim = LV_SCR_LOAD_ANIM_FADE_IN;
   }
-  lv_screen_load_anim(s, anim, anim == LV_SCR_LOAD_ANIM_NONE ? 0 : 180, 0, false);
+  if (UI_ANIM_MS == 0) anim = LV_SCR_LOAD_ANIM_NONE;
+  lv_screen_load_anim(s, anim, anim == LV_SCR_LOAD_ANIM_NONE ? 0 : UI_ANIM_MS, 0, false);
   if (uiModalScr) {
     lv_obj_delete_delayed(uiModalScr, 50);
     uiModalScr = nullptr;

@@ -1,3 +1,6 @@
+#ifndef CPU_MHZ
+#define CPU_MHZ 160
+#endif
 #include "UhrMeldezaehler_core.h"
 #include "ui_ctl.h"
 #include "ui.h"
@@ -20,7 +23,7 @@ void setup() {
 
   // Akku sparen: WLAN aus, CPU-Takt senken (BLE/Display/Sensor laufen damit problemlos)
   WiFi.mode(WIFI_OFF);
-  setCpuFrequencyMhz(160);
+  setCpuFrequencyMhz(CPU_MHZ);
 
   Wire.begin(IIC_SDA, IIC_SCL);
 
