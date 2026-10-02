@@ -367,3 +367,45 @@ sporadisch". Ungetestet auf der Uhr – nur kompiliert (Flash 50 %, RAM 41 %).
   Abläufe (Kalibrierung, TISCH-Messung) nutzen `vibrateBlocking()`.
 - Unverändert und weiter zu prüfen: QSPI 80 MHz, Dauer von `Invoke()`
   (`[perf] CNN avg`), blockierende Kalibrier-/WLAN-Abläufe.
+
+## 02.10.2026 – Branch `lvgl-port`: komplette Oberfläche auf LVGL 9.3
+
+Auftrag: „Portiere einfach alles nach gui framework, kannst auch flow der
+Masken ändern oder die Masken anders gestalten … Hauptsache die
+Funktionalität bleibt." WLAN auf Rückfrage: „Entfernen".
+
+- **Ursache des Ruckelns:** Arduino_GFX überträgt blockierend und tauscht
+  Pixel per CPU (~75 ms je Vollbild, `PERF_ANALYSE_2026-10-01.md`). Die
+  flüssige Hersteller-Demo nutzt esp_lcd mit DMA – entscheidend ist der
+  Treiber, nicht LVGL allein (Pis erster Versuch setzte LVGL auf Arduino_GFX).
+- **Display:** `hal_display.h` – esp_lcd Quad-SPI + DMA, Treiber
+  `esp_lcd_sh8601` aus dem Waveshare-BSP, zwei Teilpuffer à 40 Zeilen,
+  Rückfall `USE_ESP_LCD 0` (Arduino_GFX).
+- **Oberfläche:** alle Masken neu (`ui*.h`), dunkles Design, Umlaute,
+  Bestätigung vor jedem Löschen, Melden mit Seiten Zähler/Statistik/
+  Kalibrierung, Einstellungen auf einer Seite, Timer mit Rollen.
+  Zurück/Power führt aus Apps zu den Apps (vorher teils direkt zum Zifferblatt).
+- **Logik:** Zeichen-, Touch- und WLAN-Code aus `UhrMeldezaehler_core.h`
+  entfernt (3727 → ~2100 Zeilen); Touch als ein I2C-Burst; Kalibrierung
+  zeigt ihre Schritte über `uiCalibShow()`; Uhrzeit alle 200 ms gelesen.
+- **Prüfung ohne Uhr:** `tools/ui_sim` rendert alle Masken und spielt
+  Abläufe durch (0 Fehler). Firmware kompiliert (Flash 61 %, RAM 41 %).
+- **Offen:** Test auf der Uhr – Bild/Farben/Versatz mit esp_lcd, Touch-Gefühl,
+  `[perf] max loop/max ui`, CNN-Laufzeit mit `SENSOR ON`.
+
+### 02.10.2026 (Fortsetzung) – Messungen auf der Uhr
+
+Alle Werte `[perf]` auf der Uhr, Maskenwechsel per seriellem `SCREEN n`:
+
+| Stand | max loop in Ruhe | Maskenwechsel |
+|---|---|---|
+| main (Canvas, Sensor an) | 75 ms + CNN 420 ms alle 0,5 s | – |
+| LVGL + esp_lcd, Analog-Zeiger bildschirmgroß | ~100 ms je Sekunde | – |
+| Zeiger als kleine Objekte | 1,4 ms | 75–100 ms (mit Animation) |
+| + CNN im Task auf Kern 0, -O2, ohne Animation | **2,4 ms (Sensor an)** | **52–78 ms** |
+
+- **Hauptursache des zähen Touchs:** `Invoke()` des CNN dauerte 310–420 ms
+  und lief alle 0,5 s in `loop()`. Jetzt Task `cnnWorker` auf Kern 0;
+  Ergebnis 0,5 s versetzt. Die Perf-Analyse vom 01.10. lief mit Sensor aus.
+- 2 LVGL-Render-Einheiten (FreeRTOS) brachten keinen Gewinn – verworfen.
+- 240 MHz statt 160 MHz: Rendern ~25 % schneller; nicht übernommen (Akku).
