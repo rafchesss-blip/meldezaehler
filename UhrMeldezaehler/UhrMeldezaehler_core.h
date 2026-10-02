@@ -1786,7 +1786,8 @@ static void enterDeepSleep() {
 
 static void enterStandby() {
   // Sensor aus + BLE aus -> nur noch RTC nötig -> ESP32 komplett schlafen legen
-  if (!sensorOn && !btOn && !alarmActive && !streamMode && !sensorRec) {
+  // (laufender Timer: wach bleiben, sonst käme der Alarm nie)
+  if (!sensorOn && !btOn && !alarmActive && !timerRunning && !streamMode && !sensorRec) {
     enterDeepSleep();
     return;
   }

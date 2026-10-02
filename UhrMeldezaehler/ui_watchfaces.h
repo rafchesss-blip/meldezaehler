@@ -153,6 +153,7 @@ static void wfBuildAnalog(lv_obj_t *s) {
   lv_scale_set_angle_range(sc, 360);
   lv_scale_set_rotation(sc, 270);
   lv_scale_set_label_show(sc, false);
+  lv_obj_remove_flag(sc, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_set_style_length(sc, 6, LV_PART_ITEMS);
   lv_obj_set_style_length(sc, 16, LV_PART_INDICATOR);
   lv_obj_set_style_line_color(sc, C_TEXT3, LV_PART_ITEMS);
@@ -189,6 +190,7 @@ static void wfBuildDigital(lv_obj_t *s) {
   lv_obj_set_size(wf.battBar, 270, 14);
   lv_obj_set_pos(wf.battBar, 70, 352);
   lv_bar_set_range(wf.battBar, 0, 100);
+  lv_obj_remove_flag(wf.battBar, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_set_style_bg_color(wf.battBar, C_SURFACE2, LV_PART_MAIN);
   lv_obj_set_style_radius(wf.battBar, 7, LV_PART_MAIN);
   lv_obj_set_style_radius(wf.battBar, 7, LV_PART_INDICATOR);
@@ -290,7 +292,7 @@ static void wfUpdate(int idx) {
   }
   if (wf.battBar) {
     lv_bar_set_value(wf.battBar, pct < 0 ? 0 : pct, LV_ANIM_OFF);
-    lv_obj_set_style_bg_color(wf.battBar, uiBattColor(pct < 0 ? 0 : pct), LV_PART_INDICATOR);
+    uiSetBg(wf.battBar, uiBattColor(pct < 0 ? 0 : pct), LV_PART_INDICATOR);
   }
 
   switch (idx) {

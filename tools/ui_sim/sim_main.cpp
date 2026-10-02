@@ -202,6 +202,25 @@ int main(int argc, char **argv) {
   shot("wf_nach_auswahl");
   simLog.clear();
 
+  printf("Halten mitten auf dem Analog-Zifferblatt -> Auswahl; dort runter wischen -> zurück\n");
+  press(205, 208, 2300);
+  expectInt("screen", screen, 3);
+  swipe(205, 150, 205, 450);
+  expectInt("screen", screen, 0);
+  for (int f : {4, 5, 3}) {   // Geometrisch (Band), Schule (Karte), Digital (Akkubalken)
+    watchface = f;
+    step(300);
+    press(f == 3 ? 205 : 205, f == 3 ? 360 : 230, 2300);
+    char n[40];
+    snprintf(n, sizeof(n), "screen nach Halten auf wf%d", f);
+    expectInt(n, screen, 3);
+    screen = 0;
+    step(300);
+  }
+  watchface = 2;
+  step(300);
+  simLog.clear();
+
   printf("Hoch wischen -> Apps\n");
   swipe(205, 420, 205, 150);
   expectInt("screen", screen, 4);

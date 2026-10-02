@@ -122,6 +122,7 @@ static void alarmStop() { simCall("alarmStop"); alarmActive = false; }
 static void enterStandby() { simCall("enterStandby"); standby = true; }
 static void clearCalibration() { simCall("clearCalibration"); }
 static void runCalibrationPart(int p) { simCall("runCalibrationPart(%d)", p); }
+static bool halOk = true;
 static void halSetBrightness(uint8_t b) { simCall("halSetBrightness(%d)", b); }
 
 static bool simTouchDown = false;

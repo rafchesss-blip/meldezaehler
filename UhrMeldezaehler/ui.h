@@ -57,16 +57,24 @@ static void uiWfEvent(lv_event_t *e) {
       uiWfHoldFired = true;
       vibrate(80);
       screen = UI_PICKER;
+      lv_indev_wait_release(lv_indev_active());   // Loslassen löst nichts mehr aus
     }
   } else if (code == LV_EVENT_GESTURE) {
     lv_dir_t d = lv_indev_get_gesture_dir(lv_indev_active());
-    if (d == LV_DIR_TOP) screen = UI_APPS;
+    if (d == LV_DIR_TOP) {
+      screen = UI_APPS;
+      lv_indev_wait_release(lv_indev_active());
+    }
   }
 }
 
 // Apps und Zifferblatt-Auswahl: nach unten wischen = zurück zum Zifferblatt
 static void uiSwipeDownHome(lv_event_t *e) {
-  if (lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_BOTTOM) screen = UI_WF;
+  if (lv_indev_get_gesture_dir(lv_indev_active()) == LV_DIR_BOTTOM) {
+    screen = UI_WF;
+    // sonst kommt beim Loslassen noch ein CLICKED an der Kachel unter dem Finger an
+    lv_indev_wait_release(lv_indev_active());
+  }
 }
 
 static lv_obj_t *uiBuildWatchface() {
@@ -168,6 +176,7 @@ static void uiSync() {
 
 // Nach dem Aufwachen aus dem Standby alles neu übertragen (Panel war im Sleep)
 static void uiInvalidateAll() {
+  if (!halOk) return;
   lv_obj_invalidate(lv_screen_active());
 }
 
@@ -248,6 +257,7 @@ static void uiCalibBuild() {
 
 // countdown > 0: große Zahl; rep > 0: Fortschritt „Wiederholung rep/reps“
 static void uiCalibShow(const char *title, const char *sub, int countdown, int rep, int reps) {
+  if (!halOk) return;   // ohne Display läuft die Kalibrierung blind weiter
   if (!uc.active) uiCalibBuild();
   uiSetText(uc.title, title);
   uiSetText(uc.sub, sub);
@@ -265,6 +275,7 @@ static void uiCalibShow(const char *title, const char *sub, int countdown, int r
 
 // Vollbild-Meldung (z. B. Kalibrierung fertig, TISCH gespeichert)
 static void uiMessage(const char *icon, lv_color_t c, const char *title, const char *sub) {
+  if (!halOk) return;
   lv_obj_t *s = uiModal();
   lv_obj_t *ring = wfCircle(s, UI_W / 2, 170, 64, c);
   lv_obj_t *ic = uiLabel(ring, &font_m32, lv_color_black(), icon);

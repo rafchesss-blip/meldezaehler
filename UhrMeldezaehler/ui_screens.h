@@ -233,19 +233,19 @@ static void uiRefreshMelde() {
   int v = tile ? lv_obj_get_index(tile) : 0;
   uiSetText(um.title, UM_TITLES[v]);
   for (int i = 0; i < 3; i++)
-    lv_obj_set_style_bg_color(um.dots[i], i == v ? C_TEXT : C_TEXT3, 0);
+    uiSetBg(um.dots[i], i == v ? C_TEXT : C_TEXT3);
 
   // Zähler
   uiSetTextFmt(um.count, "%d", totalHeute);
   if (!sensorOn) {
     uiSetText(um.state, "Sensor aus");
-    lv_obj_set_style_bg_color(um.stateDot, C_RED, 0);
+    uiSetBg(um.stateDot, C_RED);
   } else if (imHoch) {
     uiSetText(um.state, "Arm oben");
-    lv_obj_set_style_bg_color(um.stateDot, C_AMBER, 0);
+    uiSetBg(um.stateDot, C_AMBER);
   } else {
     uiSetText(um.state, "Arm unten");
-    lv_obj_set_style_bg_color(um.stateDot, C_GREEN, 0);
+    uiSetBg(um.stateDot, C_GREEN);
   }
   if (sensorOn)
     uiSetTextFmt(um.model, "Erkannt: %s  %d %%", aktuellKlasse == 0 ? "Meldung" : "keine Meldung",
@@ -274,8 +274,13 @@ static void uiRefreshMelde() {
     int vv = minHist[(minHistIdx + i) % 60];
     if (vv > mx) mx = vv;
   }
-  lv_chart_set_range(um.chart, LV_CHART_AXIS_PRIMARY_Y, 0, mx);
+  static int lastMx = -1;
   bool changed = false;
+  if (mx != lastMx) {
+    lv_chart_set_range(um.chart, LV_CHART_AXIS_PRIMARY_Y, 0, mx);
+    lastMx = mx;
+    changed = true;
+  }
   for (int i = 0; i < 60; i++) {
     int32_t vv = minHist[(minHistIdx + i) % 60];
     if (lv_chart_get_y_array(um.chart, um.ser)[i] != vv) {
@@ -376,6 +381,7 @@ static lv_obj_t *uiBuildPicker() {
   lv_obj_t *c = uiContent(s, 8);
   for (int i = 0; i < 6; i++) {
     uiPickRows[i] = uiRow(c, LV_SYMBOL_IMAGE, lv_color_hex(WF_COLORS[i]), WF_NAMES[i], uiPickCb, (void *)(intptr_t)i);
+    lv_obj_set_height(uiPickRows[i], 60);   // alle 6 ohne Scrollen -> Wischen nach unten bleibt Geste
     uiPickChecks[i] = uiRowValue(uiPickRows[i], LV_SYMBOL_OK, C_GREEN);
   }
   return s;
@@ -384,8 +390,11 @@ static lv_obj_t *uiBuildPicker() {
 static void uiRefreshPicker() {
   for (int i = 0; i < 6; i++) {
     uiSetHidden(uiPickChecks[i], i != watchface);
-    lv_obj_set_style_border_width(uiPickRows[i], i == watchface ? 2 : 0, 0);
-    lv_obj_set_style_border_color(uiPickRows[i], C_GREEN, 0);
+    int bw = i == watchface ? 2 : 0;
+    if (lv_obj_get_style_border_width(uiPickRows[i], 0) != bw) {
+      lv_obj_set_style_border_width(uiPickRows[i], bw, 0);
+      lv_obj_set_style_border_color(uiPickRows[i], C_GREEN, 0);
+    }
   }
 }
 
@@ -583,7 +592,7 @@ static void uiRefreshZeit() {
   int tab = zeitTab == 1 ? 1 : 0;
   for (int i = 0; i < 2; i++) {
     uiSetHidden(uz.page[i], i != tab);
-    lv_obj_set_style_bg_color(uz.seg[i], i == tab ? C_AMBER : C_SURFACE, 0);
+    uiSetBg(uz.seg[i], i == tab ? C_AMBER : C_SURFACE);
     uiSetColor(lv_obj_get_child(uz.seg[i], 0), i == tab ? lv_color_black() : C_TEXT);
   }
   // Timer: Rollen zum Einstellen, solange er steht und voll ist; sonst Restzeit groß
@@ -598,13 +607,13 @@ static void uiRefreshZeit() {
     if ((unsigned long)lv_roller_get_selected(uz.rSec) != s % 60) lv_roller_set_selected(uz.rSec, s % 60, LV_ANIM_OFF);
   }
   uiSetText(uz.tStartLbl, timerRunning ? LV_SYMBOL_PAUSE "  Pause" : (setMode ? LV_SYMBOL_PLAY "  Start" : LV_SYMBOL_PLAY "  Weiter"));
-  lv_obj_set_style_bg_color(uz.tStart, timerRunning ? C_AMBER : C_GREEN, 0);
+  uiSetBg(uz.tStart, timerRunning ? C_AMBER : C_GREEN);
 
   // Stoppuhr
   unsigned long ms = ctlStopwatchMs();
   uiSetTextFmt(uz.swBig, "%02lu:%02lu.%02lu", (ms / 60000) % 100, (ms / 1000) % 60, (ms / 10) % 100);
   uiSetText(uz.swStartLbl, stopwatchRunning ? LV_SYMBOL_STOP "  Stopp" : LV_SYMBOL_PLAY "  Start");
-  lv_obj_set_style_bg_color(uz.swStart, stopwatchRunning ? C_RED : C_GREEN, 0);
+  uiSetBg(uz.swStart, stopwatchRunning ? C_RED : C_GREEN);
 }
 
 static void uiAlarmStopCb(lv_event_t *) { ctlAlarmStop(); }

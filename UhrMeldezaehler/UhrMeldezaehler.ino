@@ -48,14 +48,14 @@ void setup() {
     USBSerial.println("Display init fehlgeschlagen!");
   }
   touchInit();
-  uiInit();
+  if (halOk) uiInit();
 
   // IMU
   bool imuOk = qmiInit();
   USBSerial.printf("QMI8658: %s\n", imuOk ? "OK" : "FEHLER");
   if (!imuOk) {
     halSetBrightness(200);
-    uiFatal("Sensorfehler", "Bewegungssensor QMI8658 nicht gefunden.");
+    if (halOk) uiFatal("Sensorfehler", "Bewegungssensor QMI8658 nicht gefunden.");
     while (1) delay(1000);
   }
 
@@ -72,6 +72,11 @@ void setup() {
   motorOn = prefs.getInt("motorOn", 1) == 1;
   muteInLessons = prefs.getInt("muteLessons", 0) == 1;
   lastSession = prefs.getInt("lastSession", 0);
+  // Erst ein Bild ins Panel, dann Licht an – sonst ist kurz der alte Panel-Speicher zu sehen
+  if (halOk) {
+    uiSync();
+    lv_refr_now(nullptr);
+  }
   halSetBrightness(brightness);
 
   // Stundenplan + Stunden-Statistik aus NVS laden
@@ -103,7 +108,7 @@ void setup() {
     USBSerial.printf("Kalibrierung aus NVS geladen. enterHoch=%.3f\n", enterHoch);
   } else {
     // Erst-Kalibrierung: erst tragen lassen, dann auf Tipp warten
-    uiFirstBoot();
+    if (halOk) uiFirstBoot();
     USBSerial.println("Warte auf Tipp zum Kalibrieren (oder Befehl CAL) ...");
     waitForTap();
     runCalibration();
@@ -206,7 +211,7 @@ void loop() {
   //    Im Standby/Streaming ruht die Oberfläche; Touch wird dann nicht gelesen.
   ctlProcessPending();
   static unsigned long uiMaxUs = 0;
-  if (!standby && !streamMode) {
+  if (halOk && !standby && !streamMode) {
     unsigned long u0 = micros();
     uiSync();
     lv_timer_handler();

@@ -83,11 +83,20 @@ static lv_obj_t *uiScreen() {
 }
 
 // Unsichtbarer Container ohne Rahmen/Hintergrund
+// Nicht anklickbar: Touches gehen an den Knopf darin bzw. an die Maske dahinter
+// (sonst schlucken Zierflächen Halten/Lang-Drücken der Maske).
 static lv_obj_t *uiBox(lv_obj_t *parent) {
   lv_obj_t *b = lv_obj_create(parent);
   lv_obj_remove_style_all(b);
   lv_obj_remove_flag(b, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_remove_flag(b, LV_OBJ_FLAG_CLICKABLE);
   return b;
+}
+
+// Hintergrundfarbe nur bei Änderung setzen (jede Zuweisung zeichnet neu)
+static void uiSetBg(lv_obj_t *obj, lv_color_t c, lv_style_selector_t sel = 0) {
+  if (lv_color_eq(lv_obj_get_style_bg_color(obj, sel), c)) return;
+  lv_obj_set_style_bg_color(obj, c, sel);
 }
 
 // Kopfzeile mit Zurück-Knopf und Titel; Rückgabe: Zurück-Knopf

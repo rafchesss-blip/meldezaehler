@@ -36,6 +36,7 @@
 #endif
 
 static lv_display_t *halDisp = nullptr;
+static bool halOk = false;   // false: kein Display – Logik läuft ohne Oberfläche weiter
 
 #if USE_ESP_LCD
 static esp_lcd_panel_io_handle_t halIo = nullptr;
@@ -69,7 +70,11 @@ static bool halOnColorDone(esp_lcd_panel_io_handle_t, esp_lcd_panel_io_event_dat
 static void halFlush(lv_display_t *disp, const lv_area_t *a, uint8_t *px) {
   // Panel erwartet RGB565 big-endian; Tausch auf dem Teilpuffer ist billig
   lv_draw_sw_rgb565_swap(px, lv_area_get_size(a));
-  esp_lcd_panel_draw_bitmap(halPanel, a->x1, a->y1, a->x2 + 1, a->y2 + 1, px);
+  if (esp_lcd_panel_draw_bitmap(halPanel, a->x1, a->y1, a->x2 + 1, a->y2 + 1, px) != ESP_OK) {
+    // Kein DMA gestartet -> halOnColorDone kommt nie; sonst wartet LVGL ewig
+    lv_display_flush_ready(disp);
+    return;
+  }
   // flush_ready kommt aus halOnColorDone, sobald der DMA fertig ist
 }
 #else
@@ -164,6 +169,7 @@ static bool halDisplayInit() {
   lv_display_set_flush_cb(halDisp, halFlush);
   lv_display_set_buffers(halDisp, b1, b2, bytes, LV_DISPLAY_RENDER_MODE_PARTIAL);
   lv_display_add_event_cb(halDisp, halRounder, LV_EVENT_INVALIDATE_AREA, nullptr);
+  halOk = true;
   USBSerial.printf("[hal] Display bereit (%s, 2x%u Zeilen)\n",
                    USE_ESP_LCD ? "esp_lcd/DMA" : "Arduino_GFX", (unsigned)HAL_BUF_LINES);
   return true;
