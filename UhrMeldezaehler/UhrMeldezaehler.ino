@@ -1,4 +1,9 @@
+#ifndef CPU_MHZ
+#define CPU_MHZ 160
+#endif
 #include "UhrMeldezaehler_core.h"
+#include "ui_ctl.h"
+#include "ui.h"
 
 void setup() {
   // Deep-Sleep-Timer-Wakeup: nur prüfen, ob die Power-Taste gedrückt wurde.
@@ -18,7 +23,7 @@ void setup() {
 
   // Akku sparen: WLAN aus, CPU-Takt senken (BLE/Display/Sensor laufen damit problemlos)
   WiFi.mode(WIFI_OFF);
-  setCpuFrequencyMhz(160);
+  setCpuFrequencyMhz(CPU_MHZ);
 
   Wire.begin(IIC_SDA, IIC_SCL);
 
@@ -41,28 +46,21 @@ void setup() {
   USBSerial.printf("PMU AXP2101: %s\n", pmuOk ? "OK" : "FEHLER");
   Wire.setClock(400000);
 
-  // Display
-  if (!canvas->begin(80000000)) {   // QSPI 80 MHz statt 40 MHz – halbiert die Flush-Zeit (flüssigeres UI)
+  // Display (LVGL) + Touch
+  if (!halDisplayInit()) {
     USBSerial.println("Display init fehlgeschlagen!");
   }
-  canvas->fillScreen(BLACK);
-  canvas->flush();
+  touchInit();
+  if (halOk) uiInit();
 
   // IMU
   bool imuOk = qmiInit();
   USBSerial.printf("QMI8658: %s\n", imuOk ? "OK" : "FEHLER");
   if (!imuOk) {
-    canvas->fillScreen(BLACK);
-    canvas->setTextSize(2);
-    canvas->setTextColor(RED);
-    canvas->setCursor(60, 220);
-    canvas->print("QMI8658 nicht gefunden!");
-    canvas->flush();
+    halSetBrightness(200);
+    if (halOk) uiFatal("Sensorfehler", "Bewegungssensor QMI8658 nicht gefunden.");
     while (1) delay(1000);
   }
-
-  // Touch
-  touchInit();
 
   // Tasten
   pinMode(BOOT_BTN_PIN, INPUT_PULLUP);
@@ -77,7 +75,12 @@ void setup() {
   motorOn = prefs.getInt("motorOn", 1) == 1;
   muteInLessons = prefs.getInt("muteLessons", 0) == 1;
   lastSession = prefs.getInt("lastSession", 0);
-  gfx->setBrightness(brightness);
+  // Erst ein Bild ins Panel, dann Licht an – sonst ist kurz der alte Panel-Speicher zu sehen
+  if (halOk) {
+    uiSync();
+    lv_refr_now(nullptr);
+  }
+  halSetBrightness(brightness);
 
   // Stundenplan + Stunden-Statistik aus NVS laden
   loadTimetable();
@@ -108,17 +111,7 @@ void setup() {
     USBSerial.printf("Kalibrierung aus NVS geladen. enterHoch=%.3f\n", enterHoch);
   } else {
     // Erst-Kalibrierung: erst tragen lassen, dann auf Tipp warten
-    canvas->fillScreen(BLACK);
-    canvas->setTextSize(2);
-    canvas->setTextColor(WHITE);
-    canvas->setCursor(70, 200);
-    canvas->print("Uhr anlegen, dann");
-    canvas->setCursor(70, 240);
-    canvas->print("auf das Display tippen");
-    canvas->setTextColor(YELLOW);
-    canvas->setCursor(90, 300);
-    canvas->print("(Kalibrierung startet)");
-    canvas->flush();
+    if (halOk) uiFirstBoot();
     USBSerial.println("Warte auf Tipp zum Kalibrieren (oder Befehl CAL) ...");
     waitForTap();
     runCalibration();
@@ -214,20 +207,19 @@ void loop() {
     minuteStartMs += minuteElapsed * 60000UL;
   }
 
-  // 3) Display: Screens mit Live-Daten 5x/s, übrige 1x/s, sofort nach Interaktion
-  static unsigned long lastDrawMs = 0;
-  if (nowMs - lastDrawMs >= redrawIntervalMs() || redrawNow) {
-    lastDrawMs = nowMs;
-    redrawNow = false;
-    updateEnv();
-    if (!standby && !streamMode) renderAndFlush();
-  }
+  // 3) Uhrzeit, Akku, Stunde, BLE-Werte
+  updateEnv();
 
-  // 4) Touch @ ~30 Hz (im Standby kein Touch-Pollen – Aufwachen nur per Power)
-  static unsigned long lastTouchMs = 0;
-  if (nowMs - lastTouchMs >= 30) {
-    lastTouchMs = nowMs;
-    if (!standby && !streamMode) handleTouch();
+  // 4) Oberfläche: Navigation + LVGL (Touch lesen, geänderte Flächen zeichnen).
+  //    Im Standby/Streaming ruht die Oberfläche; Touch wird dann nicht gelesen.
+  ctlProcessPending();
+  static unsigned long uiMaxUs = 0;
+  if (halOk && !standby && !streamMode) {
+    unsigned long u0 = micros();
+    uiSync();
+    lv_timer_handler();
+    unsigned long du = micros() - u0;
+    if (du > uiMaxUs) uiMaxUs = du;
   }
 
   // 4b) BLE-Befehle aus der App abarbeiten (im Bluetooth-Task nur eingereiht)
@@ -256,8 +248,9 @@ void loop() {
     if (d > loopMaxUs) loopMaxUs = d;
     if (nowMs - loopReportMs > 5000) {
       loopReportMs = nowMs;
-      USBSerial.printf("[perf] max loop=%lu us\n", loopMaxUs);
+      USBSerial.printf("[perf] max loop=%lu us  max ui=%lu us\n", loopMaxUs, uiMaxUs);
       loopMaxUs = 0;
+      uiMaxUs = 0;
     }
   }
 }
