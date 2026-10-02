@@ -83,15 +83,16 @@ static lv_obj_t *wfCircle(lv_obj_t *p, int cx, int cy, int r, lv_color_t c) {
   return o;
 }
 
+// Zeiger: das Linienobjekt ist nur so groß wie der Zeiger selbst (wfSetHand
+// verschiebt es). Ein bildschirmgroßes Objekt würde bei jedem Sekundenschritt
+// das ganze Zifferblatt neu rendern lassen (~100 ms auf der Uhr).
 static lv_obj_t *wfHand(lv_obj_t *p, lv_point_precise_t *pts, int w, lv_color_t c) {
   lv_obj_t *l = lv_line_create(p);
   lv_obj_set_style_line_width(l, w, 0);
   lv_obj_set_style_line_color(l, c, 0);
   lv_obj_set_style_line_rounded(l, true, 0);
-  lv_obj_set_size(l, UI_W, UI_H);
-  lv_obj_set_pos(l, 0, 0);
-  pts[0].x = pts[1].x = 205;
-  pts[0].y = pts[1].y = 208;
+  pts[0].x = pts[1].x = 0;
+  pts[0].y = pts[1].y = 0;
   lv_line_set_points(l, pts, 2);
   return l;
 }
@@ -262,11 +263,19 @@ static void wfBuild(lv_obj_t *s, int idx) {
 static void wfSetHand(lv_obj_t *line, lv_point_precise_t *pts, float deg, int tail, int len) {
   float r = (deg - 90.0f) * 3.14159265f / 180.0f;
   float c = cosf(r), s = sinf(r);
-  lv_point_precise_t a = {(lv_value_precise_t)(205 - c * tail), (lv_value_precise_t)(208 - s * tail)};
-  lv_point_precise_t b = {(lv_value_precise_t)(205 + c * len), (lv_value_precise_t)(208 + s * len)};
-  if (pts[0].x == a.x && pts[0].y == a.y && pts[1].x == b.x && pts[1].y == b.y) return;
+  int ax = (int)lroundf(205 - c * tail), ay = (int)lroundf(208 - s * tail);
+  int bx = (int)lroundf(205 + c * len), by = (int)lroundf(208 + s * len);
+  // Objekt = Hüllrechteck des Zeigers + Rand für Linienbreite/runde Enden
+  int m = lv_obj_get_style_line_width(line, 0);
+  int x0 = LV_MIN(ax, bx) - m, y0 = LV_MIN(ay, by) - m;
+  lv_point_precise_t a = {(lv_value_precise_t)(ax - x0), (lv_value_precise_t)(ay - y0)};
+  lv_point_precise_t b = {(lv_value_precise_t)(bx - x0), (lv_value_precise_t)(by - y0)};
+  if (lv_obj_get_x(line) == x0 && lv_obj_get_y(line) == y0 && pts[0].x == a.x && pts[0].y == a.y &&
+      pts[1].x == b.x && pts[1].y == b.y) return;
   pts[0] = a;
   pts[1] = b;
+  lv_obj_set_pos(line, x0, y0);
+  lv_obj_set_size(line, LV_ABS(bx - ax) + 2 * m + 1, LV_ABS(by - ay) + 2 * m + 1);
   lv_line_set_points(line, pts, 2);
 }
 

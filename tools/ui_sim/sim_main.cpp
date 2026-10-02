@@ -16,7 +16,10 @@ static uint16_t fb[UI_W * UI_H];
 static int fails = 0;
 static const char *outDir = "out";
 
+static long flushedPx = 0;   // für die Ruhe-Messung: übertragene Pixel
+
 static void flushCb(lv_display_t *d, const lv_area_t *a, uint8_t *px) {
+  flushedPx += (long)lv_area_get_width(a) * lv_area_get_height(a);
   uint16_t *p = (uint16_t *)px;
   for (int y = a->y1; y <= a->y2; y++)
     for (int x = a->x1; x <= a->x2; x++) fb[y * UI_W + x] = *p++;
@@ -59,6 +62,20 @@ static void shot(const char *name, bool settle = true) {
   }
   fclose(f);
   printf("  [shot] %s\n", name);
+}
+
+// Ruhezustand messen: 3 s, Sekunde läuft weiter; Anteil neu gezeichneter Fläche
+// pro Sekunde. Mehr als ~15 % heißt: etwas zeichnet zu viel neu.
+static void idle(const char *name) {
+  step(500);
+  flushedPx = 0;
+  for (int i = 0; i < 3; i++) {
+    cachedS = (cachedS + 1) % 60;
+    step(1000);
+  }
+  double pct = 100.0 * flushedPx / 3 / (UI_W * UI_H);
+  printf("  %s %-24s %5.1f %% Fläche/s neu\n", pct > 15 ? "ZUVIEL" : "ruhe ", name, pct);
+  if (pct > 15) fails++;
 }
 
 static void press(int x, int y, int ms) {
@@ -182,6 +199,11 @@ int main(int argc, char **argv) {
     snprintf(n, sizeof(n), "wf%d_%s", i, WF_NAMES[i]);
     shot(n);
   }
+  printf("Ruhezustand der Zifferblätter\n");
+  for (int i = 0; i < 6; i++) {
+    watchface = i;
+    idle(WF_NAMES[i]);
+  }
   ttActive = false;
   watchface = 5;
   shot("wf5_Schule_ohne_Plan");
@@ -225,17 +247,20 @@ int main(int argc, char **argv) {
   swipe(205, 420, 205, 150);
   expectInt("screen", screen, 4);
   shot("apps");
+  idle("Apps");
 
   printf("Melden: Zähler, Statistik, Kalibrierung\n");
   tapText("Melden");
   expectInt("screen", screen, 1);
   shot("melden_zaehler");
+  idle("Melden Zähler");
   imHoch = true; aktuellKlasse = 0; aktuellProb[0] = 0.91f;
   shot("melden_arm_oben");
   imHoch = false; aktuellKlasse = 1;
   swipe(340, 300, 60, 300);
   expectInt("view", view, 1);
   shot("melden_statistik");
+  idle("Melden Statistik");
   swipe(340, 300, 60, 300);
   expectInt("view", view, 2);
   shot("melden_kalibrierung");
@@ -273,6 +298,7 @@ int main(int argc, char **argv) {
   expectInt("screen", screen, 4);
   tapText("Einstellungen");
   shot("einstellungen");
+  idle("Einstellungen");
   if (us.swBt) {
     lv_obj_t *sw = us.swBt;
     lv_area_t a;
@@ -287,6 +313,7 @@ int main(int argc, char **argv) {
   tapText("Zeit");
   expectInt("screen", screen, 7);
   shot("zeit_timer");
+  idle("Zeit Timer");
   tapText("Start");
   expectInt("timerRunning", timerRunning, 1);
   step(3000);
@@ -307,6 +334,7 @@ int main(int argc, char **argv) {
   printf("Test und Aufnahme\n");
   tapText("Test");
   shot("test");
+  idle("Test");
   tapText("Motor testen");
   expectCall("vibrate(300)");
   tapText(LV_SYMBOL_LEFT);
