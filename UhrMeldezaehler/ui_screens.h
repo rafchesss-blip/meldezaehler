@@ -212,6 +212,8 @@ static lv_obj_t *uiBuildMelde() {
   um.calStatus = uiLabel(st, &font_m24, C_GREEN, "");
   um.calSub = uiLabel(st, &font_m16, C_TEXT2, "");
   lv_obj_set_pos(um.calSub, 0, 32);
+  lv_obj_set_width(um.calSub, lv_pct(100));
+  lv_label_set_long_mode(um.calSub, LV_LABEL_LONG_WRAP);
   uiRow(c2, LV_SYMBOL_REFRESH, C_YELLOW, "Komplett (3 Schritte)", uiCalCb, (void *)0);
   uiRow(c2, LV_SYMBOL_DOWN, C_CYAN, "Arm unten", uiCalCb, (void *)1);
   uiRow(c2, LV_SYMBOL_UP, C_CYAN, "Arm hoch", uiCalCb, (void *)2);
@@ -497,12 +499,14 @@ static lv_obj_t *uiRoller(lv_obj_t *parent, int maxVal, const char *unit) {
   lv_obj_set_size(col, 150, LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  lv_obj_set_style_pad_row(col, 6, 0);
   lv_obj_t *r = lv_roller_create(col);
+  // Schrift vor der Zeilenzahl setzen – die Höhe wird aus der Schrift berechnet
+  lv_obj_set_style_text_font(r, &font_m32, 0);
+  lv_obj_set_style_text_font(r, &font_m32, LV_PART_SELECTED);
   lv_roller_set_options(r, o, LV_ROLLER_MODE_NORMAL);
   lv_roller_set_visible_row_count(r, 3);
   lv_obj_set_width(r, 130);
-  lv_obj_set_style_text_font(r, &font_m32, 0);
-  lv_obj_set_style_text_font(r, &font_m32, LV_PART_SELECTED);
   lv_obj_set_style_bg_color(r, C_SURFACE, 0);
   lv_obj_set_style_border_width(r, 0, 0);
   lv_obj_set_style_radius(r, 20, 0);

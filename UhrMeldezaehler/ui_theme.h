@@ -196,7 +196,7 @@ static lv_obj_t *uiSwitchRow(lv_obj_t *parent, const char *icon, lv_color_t icon
   lv_obj_t *r = uiRow(parent, icon, iconColor, txt, nullptr);
   lv_obj_remove_flag(r, LV_OBJ_FLAG_CLICKABLE);
   lv_obj_t *sw = lv_switch_create(r);
-  lv_obj_set_size(sw, 72, 40);
+  lv_obj_set_size(sw, 62, 36);
   lv_obj_align(sw, LV_ALIGN_RIGHT_MID, 0, 0);
   lv_obj_set_style_bg_color(sw, C_SURFACE2, 0);
   lv_obj_set_style_bg_color(sw, C_GREEN, LV_PART_INDICATOR | LV_STATE_CHECKED);

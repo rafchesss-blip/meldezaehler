@@ -59,7 +59,7 @@ static UiLesson uiLessonInfo() {
 struct WfRefs {
   lv_obj_t *time, *sec, *date, *lesson, *batt, *battIcon, *count, *session;
   lv_obj_t *battBar;
-  lv_obj_t *nowName, *nowTime, *nextHead, *nextName, *noPlan;
+  lv_obj_t *nowHead, *nowName, *nowTime, *nextHead, *nextName, *noPlan;
   lv_obj_t *hHand, *mHand, *sHand;
 };
 static WfRefs wf;
@@ -118,10 +118,11 @@ static void wfBuildMinimal(lv_obj_t *s) {
 
 static void wfBuildColorful(lv_obj_t *s) {
   static const uint32_t rainbow[6] = {0xFF453A, 0xFF9F0A, 0xFFD60A, 0x30D158, 0x64D2FF, 0xBF5AF2};
+  // Regenbogen oben, Uhrzeit darunter (nicht hinein – sonst überlappen Bögen und Ziffern)
   for (int i = 0; i < 6; i++) {
     lv_obj_t *a = lv_arc_create(s);
-    lv_obj_set_size(a, 300 - i * 24, 300 - i * 24);
-    lv_obj_align(a, LV_ALIGN_TOP_MID, 0, 22 + i * 12);
+    lv_obj_set_size(a, 240 - i * 24, 240 - i * 24);
+    lv_obj_align(a, LV_ALIGN_TOP_MID, 0, 24 + i * 12);
     lv_arc_set_bg_angles(a, 180, 360);
     lv_arc_set_value(a, 0);
     lv_obj_set_style_arc_width(a, 10, LV_PART_MAIN);
@@ -131,12 +132,12 @@ static void wfBuildColorful(lv_obj_t *s) {
     lv_obj_set_style_opa(a, LV_OPA_TRANSP, LV_PART_KNOB);
     lv_obj_remove_flag(a, LV_OBJ_FLAG_CLICKABLE);
   }
-  wf.time = wfCenter(s, &font_d64, C_YELLOW, 108);
-  wf.date = wfCenter(s, &font_m24, C_CYAN, 210);
-  wf.count = wfCenter(s, &font_d96, C_GREEN, 262);
-  wf.session = wfCenter(s, &font_m20, C_TEXT2, 372);
+  wf.time = wfCenter(s, &font_d64, C_YELLOW, 168);
+  wf.date = wfCenter(s, &font_m24, C_CYAN, 246);
+  wf.count = wfCenter(s, &font_d96, C_GREEN, 282);
+  wf.session = wfCenter(s, &font_m20, C_TEXT2, 388);
   lv_label_set_text(wf.session, "Meldungen heute");
-  wf.batt = wfCenter(s, &font_m24, C_GREEN, 420);
+  wf.batt = wfCenter(s, &font_m24, C_GREEN, 432);
 }
 
 static void wfBuildAnalog(lv_obj_t *s) {
@@ -226,7 +227,7 @@ static void wfBuildSchool(lv_obj_t *s) {
   lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
   lv_obj_set_style_radius(card, 24, 0);
   lv_obj_set_style_pad_all(card, 18, 0);
-  uiLabel(card, &font_m16, C_CYAN, "JETZT");
+  wf.nowHead = uiLabel(card, &font_m16, C_CYAN, "JETZT");
   wf.nowName = uiLabel(card, &font_m32, C_TEXT, "");
   lv_obj_set_pos(wf.nowName, 0, 20);
   wf.nowTime = uiLabel(card, &font_m20, C_TEXT2, "");
@@ -334,6 +335,7 @@ static void wfUpdate(int idx) {
       UiLesson l = uiLessonInfo();
       bool plan = l.wd >= 0;
       uiSetHidden(wf.noPlan, plan);
+      uiSetText(wf.nowHead, plan ? "JETZT" : "STUNDENPLAN");
       uiSetHidden(wf.nowName, !plan);
       uiSetHidden(wf.nowTime, !plan);
       uiSetHidden(wf.nextHead, !plan || l.next < 0);
