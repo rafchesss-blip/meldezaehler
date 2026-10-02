@@ -238,15 +238,6 @@ static void rtcWrite(const RTC_Time &t) {
 // ---------------------------------------------------------------------------
 // Touch FT3168
 // ---------------------------------------------------------------------------
-static uint8_t touchReg(uint8_t reg) {
-  Wire.beginTransmission(TOUCH_ADDR);
-  Wire.write(reg);
-  Wire.endTransmission(false);
-  Wire.requestFrom((int)TOUCH_ADDR, 1);
-  if (Wire.available()) return (uint8_t)Wire.read();
-  return 0;
-}
-
 static void touchInit() {
   pinMode(TP_RESET, OUTPUT);
   digitalWrite(TP_RESET, LOW);
@@ -697,7 +688,6 @@ static String buildLessonJson() {
   return s;
 }
 
-static const char *WD_DE[7] = {"So", "Mo", "Di", "Mi", "Do", "Fr", "Sa"};
 
 // Wochentag aus Datum (Sakamoto-Algorithmus), 0=So..6=Sa
 static int weekdayOf(int d, int m, int y) {
@@ -1669,7 +1659,7 @@ class MeldeBleCallbacks : public BLECharacteristicCallbacks {
     c.data[c.len] = 0;
     // Kurz warten statt verwerfen: die App schreibt den Stundenplan Befehl für Befehl
     if (!bleCmdQueue || xQueueSend(bleCmdQueue, &c, pdMS_TO_TICKS(100)) != pdTRUE) {
-      bleCmdDropped++;
+      bleCmdDropped = bleCmdDropped + 1;
     }
   }
 };
