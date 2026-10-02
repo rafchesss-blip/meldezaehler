@@ -392,3 +392,20 @@ Funktionalität bleibt." WLAN auf Rückfrage: „Entfernen".
   Abläufe durch (0 Fehler). Firmware kompiliert (Flash 61 %, RAM 41 %).
 - **Offen:** Test auf der Uhr – Bild/Farben/Versatz mit esp_lcd, Touch-Gefühl,
   `[perf] max loop/max ui`, CNN-Laufzeit mit `SENSOR ON`.
+
+### 02.10.2026 (Fortsetzung) – Messungen auf der Uhr
+
+Alle Werte `[perf]` auf der Uhr, Maskenwechsel per seriellem `SCREEN n`:
+
+| Stand | max loop in Ruhe | Maskenwechsel |
+|---|---|---|
+| main (Canvas, Sensor an) | 75 ms + CNN 420 ms alle 0,5 s | – |
+| LVGL + esp_lcd, Analog-Zeiger bildschirmgroß | ~100 ms je Sekunde | – |
+| Zeiger als kleine Objekte | 1,4 ms | 75–100 ms (mit Animation) |
+| + CNN im Task auf Kern 0, -O2, ohne Animation | **2,4 ms (Sensor an)** | **52–78 ms** |
+
+- **Hauptursache des zähen Touchs:** `Invoke()` des CNN dauerte 310–420 ms
+  und lief alle 0,5 s in `loop()`. Jetzt Task `cnnWorker` auf Kern 0;
+  Ergebnis 0,5 s versetzt. Die Perf-Analyse vom 01.10. lief mit Sensor aus.
+- 2 LVGL-Render-Einheiten (FreeRTOS) brachten keinen Gewinn – verworfen.
+- 240 MHz statt 160 MHz: Rendern ~25 % schneller; nicht übernommen (Akku).

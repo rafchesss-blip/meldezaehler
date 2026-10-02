@@ -15,9 +15,11 @@ enum {
   UI_EDIT = 6, UI_ZEIT = 7, UI_TEST = 8, UI_REC = 9, UI_ALARM = 10, UI_COUNT = 11
 };
 
-// Dauer der Übergangsanimation; jedes Bild davon ist ein Vollbild-Rendern
+// Dauer der Übergangsanimation (0 = sofort). Während einer Schiebe-Animation
+// werden alte und neue Maske gezeichnet: auf der Uhr bis 168 ms je Bild, also
+// 2–3 ruckelnde Bilder. Sofortiger Wechsel kostet ein Bild (~45–75 ms).
 #ifndef UI_ANIM_MS
-#define UI_ANIM_MS 180
+#define UI_ANIM_MS 0
 #endif
 
 static lv_obj_t *uiScr[UI_COUNT];
