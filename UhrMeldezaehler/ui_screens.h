@@ -16,12 +16,13 @@ struct UiApp {
   uint32_t color;
   int screen;
 };
-static const UiApp UI_APP_LIST[5] = {
+static const UiApp UI_APP_LIST[6] = {
   {LV_SYMBOL_OK, "Melden", 0x30D158, 1},
   {LV_SYMBOL_BELL, "Zeit", 0xFF9F0A, 7},
   {LV_SYMBOL_SETTINGS, "Einstellungen", 0x8E8E93, 2},
   {LV_SYMBOL_SD_CARD, "Aufnahme", 0xFF453A, 9},
   {LV_SYMBOL_EYE_OPEN, "Test", 0x64D2FF, 8},
+  {LV_SYMBOL_BATTERY_FULL, "Akku-Test", 0xFFD60A, 11},
 };
 
 static void uiAppCb(lv_event_t *e) { ctlOpen((int)(intptr_t)lv_event_get_user_data(e)); }
@@ -31,13 +32,13 @@ static lv_obj_t *uiAppsMelde;   // Unterzeile der Melden-Kachel (Zähler heute)
 static lv_obj_t *uiBuildApps() {
   lv_obj_t *s = uiScreen();
   uiHeader(s, "Apps", uiBackCb);
-  for (int i = 0; i < 5; i++) {
+  for (int i = 0; i < 6; i++) {
     const UiApp &a = UI_APP_LIST[i];
-    bool wide = (i == 4);
+    const bool wide = false;   // 6 Apps = 3 Reihen à 2 Kacheln
     lv_obj_t *t = lv_button_create(s);
-    int w = wide ? UI_W - 2 * UI_PAD : (UI_W - 2 * UI_PAD - 14) / 2;
-    lv_obj_set_size(t, w, wide ? 96 : 128);
-    lv_obj_set_pos(t, UI_PAD + (wide ? 0 : (i % 2) * (w + 14)), UI_HEADER_H + 4 + (i / 2) * 142);
+    int w = (UI_W - 2 * UI_PAD - 14) / 2;
+    lv_obj_set_size(t, w, 116);
+    lv_obj_set_pos(t, UI_PAD + (i % 2) * (w + 14), UI_HEADER_H + 4 + (i / 2) * 128);
     lv_obj_set_style_radius(t, 26, 0);
     lv_obj_set_style_bg_color(t, C_SURFACE, 0);
     lv_obj_set_style_bg_color(t, C_SURFACE2, LV_STATE_PRESSED);
@@ -307,7 +308,7 @@ static void uiRefreshMelde() {
 // Einstellungen (eine Seite statt Untermenüs)
 // ===========================================================================
 static struct {
-  lv_obj_t *slider, *pct, *swBt, *swSensor, *swMotor, *swMute, *btInfo;
+  lv_obj_t *slider, *pct, *swBt, *swSensor, *swAuto, *swMotor, *swMute, *btInfo, *autoInfo;
 } us;
 
 static void uiBrightCb(lv_event_t *e) {
@@ -319,6 +320,7 @@ static void uiSwBtCb(lv_event_t *e) {
   else btDisable();
 }
 static void uiSwSensorCb(lv_event_t *) { setSensorOn(lv_obj_has_state(us.swSensor, LV_STATE_CHECKED)); }
+static void uiSwAutoCb(lv_event_t *) { setAutoSensor(lv_obj_has_state(us.swAuto, LV_STATE_CHECKED)); }
 static void uiSwMotorCb(lv_event_t *) { setMotorOn(lv_obj_has_state(us.swMotor, LV_STATE_CHECKED)); }
 static void uiSwMuteCb(lv_event_t *) { setMuteInLessons(lv_obj_has_state(us.swMute, LV_STATE_CHECKED)); }
 
@@ -348,6 +350,11 @@ static lv_obj_t *uiBuildSettings() {
   us.btInfo = uiLabel(c, &font_m16, C_TEXT2, "");
   lv_obj_set_style_pad_left(us.btInfo, 18, 0);
   us.swSensor = uiSwitchRow(c, LV_SYMBOL_EYE_OPEN, C_GREEN, "Meldungs-Sensor", uiSwSensorCb);
+  us.swAuto = uiSwitchRow(c, LV_SYMBOL_LOOP, C_GREEN, "Nur im Unterricht", uiSwAutoCb);
+  us.autoInfo = uiLabel(c, &font_m16, C_TEXT2, "");
+  lv_obj_set_width(us.autoInfo, lv_pct(100));
+  lv_label_set_long_mode(us.autoInfo, LV_LABEL_LONG_WRAP);
+  lv_obj_set_style_pad_hor(us.autoInfo, 18, 0);
   us.swMotor = uiSwitchRow(c, LV_SYMBOL_BELL, C_AMBER, "Vibration", uiSwMotorCb);
   us.swMute = uiSwitchRow(c, LV_SYMBOL_MUTE, C_PURPLE, "Stumm im Unterricht", uiSwMuteCb);
   lv_obj_t *mi = uiLabel(c, &font_m16, C_TEXT2, "Stumm: keine Vibration während einer Stunde laut Stundenplan.");
@@ -362,6 +369,11 @@ static void uiRefreshSettings() {
   uiSetTextFmt(us.pct, "%d %%", brightness * 100 / 255);
   uiSetChecked(us.swBt, btOn);
   uiSetChecked(us.swSensor, sensorOn);
+  uiSetChecked(us.swAuto, autoSensor);
+  if (!autoSensor) uiSetText(us.autoInfo, "Sensor schaltet sich laut Stundenplan ein und aus.");
+  else if (!ttActive) uiSetText(us.autoInfo, "Kein Stundenplan – in der App senden.");
+  else uiSetText(us.autoInfo, inLesson ? "Stunde läuft: automatisch an." : "Gerade frei: automatisch aus.");
+  uiSetColor(us.autoInfo, autoSensor && !ttActive ? C_AMBER : C_TEXT2);
   uiSetChecked(us.swMotor, motorOn);
   uiSetChecked(us.swMute, muteInLessons);
   uiSetText(us.btInfo, btOn ? "Sichtbar als „Meldezaehler“ für die App" : "Aus – App kann sich nicht verbinden");
@@ -481,23 +493,22 @@ static void uiRefreshEdit() {
 // ===========================================================================
 static struct {
   lv_obj_t *seg[2], *page[2];
-  lv_obj_t *tBig, *tRollers, *rMin, *rSec, *tStart, *tStartLbl;
+  lv_obj_t *tBig, *tRollers, *rHour, *rMin, *rSec, *tStart, *tStartLbl;
   lv_obj_t *swBig, *swStartLbl, *swStart;
 } uz;
 
 static void uiZeitTabCb(lv_event_t *e) { zeitTab = (int)(intptr_t)lv_event_get_user_data(e); }
 static void uiRollerCb(lv_event_t *) {
-  ctlTimerSet((lv_roller_get_selected(uz.rMin) * 60UL + lv_roller_get_selected(uz.rSec)) * 1000UL);
+  ctlTimerSet((lv_roller_get_selected(uz.rHour) * 3600UL + lv_roller_get_selected(uz.rMin) * 60UL +
+               lv_roller_get_selected(uz.rSec)) * 1000UL);
 }
 static void uiTimerStartCb(lv_event_t *) { ctlTimerToggle(); }
 static void uiTimerResetCb(lv_event_t *) { ctlTimerReset(); }
 static void uiSwStartCb(lv_event_t *) { ctlStopwatchToggle(); }
 static void uiSwResetCb(lv_event_t *) { ctlStopwatchReset(); }
 
-static lv_obj_t *uiRoller(lv_obj_t *parent, int maxVal, const char *unit) {
-  static char opts[2][400];
-  static int n = 0;
-  char *o = opts[n++ & 1];
+static lv_obj_t *uiRoller(lv_obj_t *parent, int maxVal, const char *unit, lv_event_cb_t cb = uiRollerCb) {
+  char o[200];   // lv_roller_set_options kopiert den Text
   o[0] = 0;
   for (int i = 0; i <= maxVal; i++) {
     char b[8];
@@ -505,7 +516,7 @@ static lv_obj_t *uiRoller(lv_obj_t *parent, int maxVal, const char *unit) {
     strcat(o, b);
   }
   lv_obj_t *col = uiBox(parent);
-  lv_obj_set_size(col, 150, LV_SIZE_CONTENT);
+  lv_obj_set_size(col, 106, LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(col, LV_FLEX_FLOW_COLUMN);
   lv_obj_set_flex_align(col, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   lv_obj_set_style_pad_row(col, 6, 0);
@@ -515,14 +526,14 @@ static lv_obj_t *uiRoller(lv_obj_t *parent, int maxVal, const char *unit) {
   lv_obj_set_style_text_font(r, &font_m32, LV_PART_SELECTED);
   lv_roller_set_options(r, o, LV_ROLLER_MODE_NORMAL);
   lv_roller_set_visible_row_count(r, 3);
-  lv_obj_set_width(r, 130);
+  lv_obj_set_width(r, 100);
   lv_obj_set_style_bg_color(r, C_SURFACE, 0);
   lv_obj_set_style_border_width(r, 0, 0);
   lv_obj_set_style_radius(r, 20, 0);
   lv_obj_set_style_text_color(r, C_TEXT3, 0);
   lv_obj_set_style_bg_color(r, C_SURFACE2, LV_PART_SELECTED);
   lv_obj_set_style_text_color(r, C_AMBER, LV_PART_SELECTED);
-  lv_obj_add_event_cb(r, uiRollerCb, LV_EVENT_VALUE_CHANGED, nullptr);
+  lv_obj_add_event_cb(r, cb, LV_EVENT_VALUE_CHANGED, nullptr);
   uiLabel(col, &font_m16, C_TEXT2, unit);
   return r;
 }
@@ -558,7 +569,8 @@ static lv_obj_t *uiBuildZeit() {
   lv_obj_set_flex_flow(uz.tRollers, LV_FLEX_FLOW_ROW);
   lv_obj_set_flex_align(uz.tRollers, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
   lv_obj_align(uz.tRollers, LV_ALIGN_TOP_MID, 0, 0);
-  uz.rMin = uiRoller(uz.tRollers, 99, "Minuten");
+  uz.rHour = uiRoller(uz.tRollers, 23, "Stunden");
+  uz.rMin = uiRoller(uz.tRollers, 59, "Minuten");
   uz.rSec = uiRoller(uz.tRollers, 59, "Sekunden");
   lv_obj_t *row = uiBox(tp);
   lv_obj_set_size(row, lv_pct(100), 80);
@@ -600,10 +612,15 @@ static void uiRefreshZeit() {
   uiSetHidden(uz.tRollers, !setMode);
   uiSetHidden(uz.tBig, setMode);
   unsigned long r = (timerRemainingMs + 999) / 1000;
-  uiSetTextFmt(uz.tBig, "%02lu:%02lu", r / 60, r % 60);
+  // Ab einer Stunde H:MM:SS in kleinerer Schrift – passt sonst nicht in die Breite
+  const lv_font_t *bigFont = r >= 3600 ? &font_d64 : &font_d96;
+  if (lv_obj_get_style_text_font(uz.tBig, 0) != bigFont) lv_obj_set_style_text_font(uz.tBig, bigFont, 0);
+  if (r >= 3600) uiSetTextFmt(uz.tBig, "%lu:%02lu:%02lu", r / 3600, (r / 60) % 60, r % 60);
+  else uiSetTextFmt(uz.tBig, "%02lu:%02lu", r / 60, r % 60);
   if (setMode) {
     unsigned long s = timerSetMs / 1000;
-    if ((unsigned long)lv_roller_get_selected(uz.rMin) != s / 60) lv_roller_set_selected(uz.rMin, s / 60, LV_ANIM_OFF);
+    if ((unsigned long)lv_roller_get_selected(uz.rHour) != s / 3600) lv_roller_set_selected(uz.rHour, s / 3600, LV_ANIM_OFF);
+    if ((unsigned long)lv_roller_get_selected(uz.rMin) != (s / 60) % 60) lv_roller_set_selected(uz.rMin, (s / 60) % 60, LV_ANIM_OFF);
     if ((unsigned long)lv_roller_get_selected(uz.rSec) != s % 60) lv_roller_set_selected(uz.rSec, s % 60, LV_ANIM_OFF);
   }
   uiSetText(uz.tStartLbl, timerRunning ? LV_SYMBOL_PAUSE "  Pause" : (setMode ? LV_SYMBOL_PLAY "  Start" : LV_SYMBOL_PLAY "  Weiter"));
@@ -726,4 +743,166 @@ static void uiRefreshRec() {
     uiSetTextFmt(ur.cls, "%s  ·  #%u", sensorRecLabel.c_str(), (unsigned)sensorRecTrial);
     uiSetTextFmt(ur.count, "%lu", (unsigned long)sensorRecCount);
   }
+}
+
+// ===========================================================================
+// Akku-Test: Einstellen | Lauf | Ergebnisse (Logik in akkutest.h)
+// ===========================================================================
+static struct {
+  lv_obj_t *idle, *run;
+  lv_obj_t *rH, *rM, *swS, *swD, *swM, *sims, *start;
+  lv_obj_t *resHead, *res[AK_HIST], *resTop[AK_HIST], *resBot[AK_HIST];
+  lv_obj_t *runTitle, *runBig, *runSims, *runMv, *runHint, *runCancel;
+} ua;
+
+static void uiAkRollerCb(lv_event_t *) {
+  akCfg.minutes = lv_roller_get_selected(ua.rH) * 60 + lv_roller_get_selected(ua.rM);
+}
+static void uiAkSwCb(lv_event_t *e) {
+  lv_obj_t *sw = (lv_obj_t *)lv_event_get_target(e);
+  bool on = lv_obj_has_state(sw, LV_STATE_CHECKED);
+  if (sw == ua.swS) akCfg.sensor = on;
+  else if (sw == ua.swD) akCfg.display = on;
+  else akCfg.motor = on;
+}
+static void uiAkSimsCb(lv_event_t *e) {
+  int d = (int)(intptr_t)lv_event_get_user_data(e);
+  int v = (int)akCfg.sims + d;
+  akCfg.sims = v < 0 ? 0 : (v > 200 ? 200 : v);
+}
+static void uiAkStartCb(lv_event_t *) {
+  if (akCfg.minutes == 0) { uiToast("Dauer einstellen", C_AMBER); return; }
+  akStart();
+}
+static void uiAkCancelCb(lv_event_t *) { akCancelWait(); }
+
+static lv_obj_t *uiAkStepBtn(lv_obj_t *parent, const char *txt, int delta) {
+  lv_obj_t *b = uiButtonQuiet(parent, txt, C_TEXT, uiAkSimsCb, (void *)(intptr_t)delta, 56);
+  lv_obj_set_width(b, 64);
+  lv_obj_add_event_cb(b, uiAkSimsCb, LV_EVENT_LONG_PRESSED_REPEAT, (void *)(intptr_t)delta);
+  return b;
+}
+
+static lv_obj_t *uiBuildAkku() {
+  lv_obj_t *s = uiScreen();
+  uiHeader(s, "Akku-Test", uiBackCb);
+
+  // --- Einstellen + Ergebnisse ---
+  lv_obj_t *c = ua.idle = uiContent(s, 10);
+  lv_obj_t *dk = uiCard(c);
+  uiLabel(dk, &font_m16, C_TEXT2, "Dauer");
+  lv_obj_t *rr = uiBox(dk);
+  lv_obj_set_size(rr, lv_pct(100), LV_SIZE_CONTENT);
+  lv_obj_set_pos(rr, 0, 24);
+  lv_obj_set_flex_flow(rr, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(rr, LV_FLEX_ALIGN_SPACE_EVENLY, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+  ua.rH = uiRoller(rr, 12, "Stunden", uiAkRollerCb);
+  ua.rM = uiRoller(rr, 59, "Minuten", uiAkRollerCb);
+  lv_roller_set_selected(ua.rH, akCfg.minutes / 60, LV_ANIM_OFF);
+  lv_roller_set_selected(ua.rM, akCfg.minutes % 60, LV_ANIM_OFF);
+
+  ua.swS = uiSwitchRow(c, LV_SYMBOL_EYE_OPEN, C_GREEN, "Sensor", uiAkSwCb);
+  ua.swD = uiSwitchRow(c, LV_SYMBOL_IMAGE, C_CYAN, "Display", uiAkSwCb);
+  ua.swM = uiSwitchRow(c, LV_SYMBOL_BELL, C_AMBER, "Vibration", uiAkSwCb);
+  uiSetChecked(ua.swS, akCfg.sensor);
+  uiSetChecked(ua.swD, akCfg.display);
+  uiSetChecked(ua.swM, akCfg.motor);
+
+  lv_obj_t *mk = uiCard(c);
+  uiLabel(mk, &font_m16, C_TEXT2, "Meldungen simulieren");
+  lv_obj_t *mr = uiBox(mk);
+  lv_obj_set_size(mr, lv_pct(100), LV_SIZE_CONTENT);
+  lv_obj_set_pos(mr, 0, 26);
+  lv_obj_set_flex_flow(mr, LV_FLEX_FLOW_ROW);
+  lv_obj_set_flex_align(mr, LV_FLEX_ALIGN_SPACE_BETWEEN, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  uiAkStepBtn(mr, LV_SYMBOL_MINUS, -1);
+  ua.sims = uiLabel(mr, &font_m32, C_TEXT, "");
+  uiAkStepBtn(mr, LV_SYMBOL_PLUS, 1);
+
+  ua.start = uiButton(c, LV_SYMBOL_PLAY "  Test starten", C_GREEN, uiAkStartCb);
+
+  ua.resHead = uiLabel(c, &font_m20, C_TEXT2, "Ergebnisse");
+  lv_obj_set_style_pad_top(ua.resHead, 8, 0);
+  for (int i = 0; i < AK_HIST; i++) {
+    ua.res[i] = uiCard(c);
+    lv_obj_set_style_pad_all(ua.res[i], 12, 0);
+    ua.resTop[i] = uiLabel(ua.res[i], &font_m16, C_TEXT2, "");
+    ua.resBot[i] = uiLabel(ua.res[i], &font_m20, C_TEXT, "");
+    lv_obj_set_pos(ua.resBot[i], 0, 24);
+  }
+  lv_obj_t *pc = uiLabel(c, &font_m16, C_TEXT3, "Am PC: python tools/akkutest.py");
+  lv_obj_set_style_pad_top(pc, 4, 0);
+
+  // --- Lauf / Warten auf USB ---
+  lv_obj_t *r = ua.run = uiContent(s, 12);
+  lv_obj_t *rk = uiCard(r);
+  ua.runTitle = uiLabel(rk, &font_m24, C_YELLOW, "");
+  ua.runBig = uiLabel(rk, &font_d64, C_TEXT, "");
+  lv_obj_set_pos(ua.runBig, 0, 36);
+  ua.runSims = uiLabel(rk, &font_m20, C_TEXT2, "");
+  lv_obj_set_pos(ua.runSims, 0, 112);
+  ua.runMv = uiLabel(rk, &font_m20, C_TEXT2, "");
+  lv_obj_set_pos(ua.runMv, 0, 142);
+  ua.runHint = uiLabel(r, &font_m16, C_TEXT3, "");
+  lv_obj_set_width(ua.runHint, lv_pct(100));
+  lv_label_set_long_mode(ua.runHint, LV_LABEL_LONG_WRAP);
+  ua.runCancel = uiButtonQuiet(r, "Abbrechen", C_TEXT, uiAkCancelCb);
+  return s;
+}
+
+static void uiRefreshAkku() {
+  bool idle = akState == AK_IDLE;
+  uiSetHidden(ua.idle, !idle);
+  uiSetHidden(ua.run, idle);
+  if (idle) {
+    uiSetTextFmt(ua.sims, "%u", akCfg.sims);
+    uiSetHidden(ua.resHead, akHistN == 0);
+    for (int i = 0; i < AK_HIST; i++) {
+      uiSetHidden(ua.res[i], i >= akHistN);
+      if (i >= akHistN) continue;
+      const AkResult &h = akHist[i];
+      char comp[40];
+      snprintf(comp, sizeof(comp), "%s%s%s", h.sensor ? "Sensor " : "", h.display ? "Display " : "",
+               h.motor ? "Vibration" : "");
+      if (!comp[0]) snprintf(comp, sizeof(comp), "alles aus");
+      uiSetTextFmt(ua.resTop[i], "#%lu · %u min · %s%s", (unsigned long)h.id, h.minutes, comp,
+                   h.aborted == 2 ? " · Uhr ging aus" : (h.aborted ? " · abgebrochen" : ""));
+      float ph = akPctPerHour(h);
+      if (!akValid(h)) {
+        uiSetText(ua.resBot[i], "zu kurz (mind. 5 min)");
+        uiSetColor(ua.resBot[i], C_TEXT3);
+      } else if (ph < 0) {
+        uiSetText(ua.resBot[i], "Akku stieg – lief am Kabel?");
+        uiSetColor(ua.resBot[i], C_AMBER);
+      } else if (ph < 0.5f) {
+        uiSetTextFmt(ua.resBot[i], "%d auf %d %%  ·  kaum messbar", h.pctStart, h.pctEnd);
+        uiSetColor(ua.resBot[i], C_GREEN);
+      } else {
+        float hours = 100.0f / ph;
+        uiSetTextFmt(ua.resBot[i], "%.1f %%/h  ·  voll ca. %.1f h", ph, hours);
+        uiSetColor(ua.resBot[i], hours >= 6 ? C_GREEN : (hours >= 4 ? C_AMBER : C_RED));
+      }
+    }
+    return;
+  }
+  bool wait = akState == AK_WAIT_USB;
+  uiSetHidden(ua.runCancel, !wait);
+  if (wait) {
+    uiSetText(ua.runTitle, LV_SYMBOL_USB "  USB abziehen");
+    uiSetText(ua.runBig, "--:--");
+    uiSetText(ua.runSims, "Beim Laden ist die");
+    uiSetText(ua.runMv, "Messung wertlos.");
+    uiSetText(ua.runHint, "Der Test startet von selbst, sobald das Kabel ab ist.");
+    return;
+  }
+  unsigned long el = millis() - akStartMs, dur = akDurationMs();
+  unsigned long rest = (el >= dur ? 0 : dur - el) / 1000;
+  uiSetText(ua.runTitle, LV_SYMBOL_BATTERY_2 "  Test läuft");
+  uiSetTextFmt(ua.runBig, "%lu:%02lu:%02lu", rest / 3600, (rest / 60) % 60, rest % 60);
+  uiSetTextFmt(ua.runSims, "Meldungen: %u / %u", akSimsDone, akCfg.sims);
+  if (akCur.mvStart)
+    uiSetTextFmt(ua.runMv, "Akku %d %%  ·  Start %d %%", battPctFromVoltage(akMvLast), akCur.pctStart);
+  else
+    uiSetTextFmt(ua.runMv, "Akku %d.%02d V", akMvLast / 1000, (akMvLast % 1000) / 10);
+  uiSetText(ua.runHint, "Abbrechen: Power- oder BOOT-Taste. Touch ist gesperrt.");
 }

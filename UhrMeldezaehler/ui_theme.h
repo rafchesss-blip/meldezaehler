@@ -17,7 +17,8 @@ LV_FONT_DECLARE(font_d96);
 
 #define UI_W 410
 #define UI_H 502
-#define UI_PAD 20            // Seitenrand (Display hat abgerundete Ecken)
+#define UI_PAD 32            // Seitenrand der Masken (Display hat abgerundete Ecken, ~12 px = 1 mm)
+#define UI_PAD_WF 20         // Seitenrand der Zifferblätter
 #define UI_HEADER_H 76
 
 #define C_BG       lv_color_hex(0x000000)

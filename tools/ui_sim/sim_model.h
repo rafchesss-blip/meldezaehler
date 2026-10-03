@@ -49,7 +49,7 @@ struct SimEsp {
 // --- Zustand (Werte für die Screenshots) ------------------------------------
 int screen = 0, view = 0, meldeEditMode = 0, zeitTab = 0, watchface = 0;
 int brightness = 208;
-bool btOn = true, sensorOn = true, motorOn = true, muteInLessons = false;
+bool btOn = true, sensorOn = true, motorOn = true, muteInLessons = false, autoSensor = false, inLesson = false;
 bool standby = false, alarmActive = false;
 int totalHeute = 7, sessionCount = 2, drange = 3, richtig = 2, falsch = 1;
 int minHist[60] = {0};
@@ -113,6 +113,7 @@ static void saveMeldeExtras() { simCall("saveMeldeExtras"); }
 static void setSensorOn(bool on) { simCall("setSensorOn(%d)", on); sensorOn = on; }
 static void setMotorOn(bool on) { simCall("setMotorOn(%d)", on); motorOn = on; }
 static void setMuteInLessons(bool on) { simCall("setMuteInLessons(%d)", on); muteInLessons = on; }
+static void setAutoSensor(bool on) { simCall("setAutoSensor(%d)", on); autoSensor = on; }
 static void btEnable() { simCall("btEnable"); btOn = true; }
 static void btDisable() { simCall("btDisable"); btOn = false; }
 static void vibrate(unsigned long ms = 120, int pulses = 1, unsigned long gap = 100) { simCall("vibrate(%lu)", ms); }

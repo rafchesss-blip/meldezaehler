@@ -32,7 +32,7 @@ static void powerBack() {
       if (sensorRec) stopSensorRec();
       screen = 4;
       break;
-    case 1: case 2: case 7: case 8:
+    case 1: case 2: case 7: case 8: case 11:
       screen = 4;
       break;
     default:   // 3 Auswahl, 4 Apps
@@ -86,7 +86,7 @@ static void ctlSetBrightness(int v, bool save) {
 // --- Timer -----------------------------------------------------------------
 static void ctlTimerSet(unsigned long ms) {
   if (timerRunning) return;
-  if (ms > 99UL * 60000UL + 59000UL) ms = 99UL * 60000UL + 59000UL;
+  if (ms > 23UL * 3600000UL + 59UL * 60000UL + 59000UL) ms = 23UL * 3600000UL + 59UL * 60000UL + 59000UL;
   timerSetMs = ms;
   timerRemainingMs = ms;
 }

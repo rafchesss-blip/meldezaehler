@@ -12,7 +12,7 @@
 
 enum {
   UI_WF = 0, UI_MELDE = 1, UI_SETTINGS = 2, UI_PICKER = 3, UI_APPS = 4,
-  UI_EDIT = 6, UI_ZEIT = 7, UI_TEST = 8, UI_REC = 9, UI_ALARM = 10, UI_COUNT = 11
+  UI_EDIT = 6, UI_ZEIT = 7, UI_TEST = 8, UI_REC = 9, UI_ALARM = 10, UI_AKKU = 11, UI_COUNT = 12
 };
 
 // Dauer der Übergangsanimation (0 = sofort). Während einer Schiebe-Animation
@@ -113,6 +113,7 @@ static lv_obj_t *uiGetScreen(int k) {
     case UI_TEST: s = uiBuildTest(); break;
     case UI_REC: s = uiBuildRec(); break;
     case UI_ALARM: s = uiBuildAlarm(); break;
+    case UI_AKKU: s = uiBuildAkku(); break;
   }
   uiScr[k] = s;
   return s;
@@ -129,6 +130,7 @@ static void uiRefreshShown() {
     case UI_ZEIT: uiRefreshZeit(); break;
     case UI_TEST: uiRefreshTest(); break;
     case UI_REC: uiRefreshRec(); break;
+    case UI_AKKU: uiRefreshAkku(); break;
   }
   // Akku-Warnleiste über allen Masken
   bool low = cachedPct >= 0 && cachedPct < 20;
@@ -193,7 +195,8 @@ static void uiInvalidateAll() {
 // ---------------------------------------------------------------------------
 static void uiTouchRead(lv_indev_t *, lv_indev_data_t *d) {
   uint16_t x, y;
-  if (touchRead(x, y)) {
+  // Akku-Test läuft: Touch sperren, damit nichts verstellt wird (Abbruch per Taste)
+  if (akState != AK_RUN && touchRead(x, y)) {
     d->state = LV_INDEV_STATE_PRESSED;
     d->point.x = x;
     d->point.y = y;

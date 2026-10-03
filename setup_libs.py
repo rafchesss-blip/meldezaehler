@@ -27,6 +27,8 @@ def sketchbook_libraries() -> pathlib.Path:
     cfg = json.loads(cli("config", "dump", "--format", "json"))
     cfg = cfg.get("config", cfg)
     user = cfg.get("directories", {}).get("user")
+    if not user:   # ohne Konfigurationsdatei liefert dump {} – Standardwert abfragen
+        user = cli("config", "get", "directories.user").strip()
     if not user:
         sys.exit("arduino-cli: directories.user nicht gefunden")
     return pathlib.Path(user) / "libraries"

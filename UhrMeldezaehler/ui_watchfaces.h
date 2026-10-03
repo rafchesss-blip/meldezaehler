@@ -58,6 +58,7 @@ static UiLesson uiLessonInfo() {
 // --- Gemeinsame Referenzen; nicht jedes Zifferblatt nutzt alle -------------
 struct WfRefs {
   lv_obj_t *time, *sec, *date, *lesson, *batt, *battIcon, *count, *session;
+  lv_obj_t *hour, *minute;   // Geometrisch: Stunden und Minuten getrennt
   lv_obj_t *battBar;
   lv_obj_t *nowHead, *nowName, *nowTime, *nextHead, *nextName, *noPlan;
   lv_obj_t *hHand, *mHand, *sHand;
@@ -199,33 +200,48 @@ static void wfBuildDigital(lv_obj_t *s) {
   wf.count = wfCenter(s, &font_m24, C_YELLOW, 430);
 }
 
+// Bauhaus-Stil: Stunden und Minuten übereinander, daneben Kreis und Quadrat
+// in Grundfarben, ein roter Balken trennt die Infozeilen. Linke Kante x=66,
+// rechte Kante x=344 – die Komposition sitzt mittig im Display.
 static void wfBuildGeometric(lv_obj_t *s) {
-  wfCircle(s, 80, 100, 60, C_YELLOW);
-  wfCircle(s, 330, 100, 60, C_CYAN);
-  lv_obj_t *band = uiBox(s);
-  lv_obj_set_size(band, UI_W, 150);
-  lv_obj_set_pos(band, 0, 180);
-  lv_obj_set_style_bg_color(band, C_PURPLE, 0);
-  lv_obj_set_style_bg_opa(band, LV_OPA_COVER, 0);
-  wf.time = wfCenter(s, &font_d96, C_TEXT, 190);
-  wf.date = wfCenter(s, &font_m24, lv_color_black(), 292);
-  wfBattRow(s, 40, 392);
-  lv_obj_t *pill = uiBox(s);
-  lv_obj_set_size(pill, 150, 52);
-  lv_obj_set_pos(pill, 222, 386);
-  lv_obj_set_style_radius(pill, 26, 0);
-  lv_obj_set_style_bg_color(pill, C_GREEN, 0);
-  lv_obj_set_style_bg_opa(pill, LV_OPA_COVER, 0);
-  wf.count = uiLabel(pill, &font_m24, lv_color_black(), "");
-  lv_obj_center(wf.count);
+  const int L = 66, R = 344;
+  wf.hour = uiLabel(s, &font_d96, C_TEXT, "");
+  lv_obj_set_width(wf.hour, 140);
+  lv_obj_set_style_text_align(wf.hour, LV_TEXT_ALIGN_RIGHT, 0);
+  lv_obj_set_pos(wf.hour, L, 96);
+  wfCircle(s, 286, 130, 46, C_YELLOW);
+
+  wf.minute = uiLabel(s, &font_d96, C_TEXT, "");
+  lv_obj_set_width(wf.minute, 140);
+  lv_obj_set_style_text_align(wf.minute, LV_TEXT_ALIGN_RIGHT, 0);
+  lv_obj_set_pos(wf.minute, L, 196);
+  lv_obj_t *sq = uiBox(s);
+  lv_obj_set_size(sq, 92, 92);
+  lv_obj_set_pos(sq, 240, 184);
+  lv_obj_set_style_radius(sq, 14, 0);
+  lv_obj_set_style_bg_color(sq, C_BLUE, 0);
+  lv_obj_set_style_bg_opa(sq, LV_OPA_COVER, 0);
+
+  lv_obj_t *bar = uiBox(s);
+  lv_obj_set_size(bar, R - L, 10);
+  lv_obj_set_pos(bar, L, 304);
+  lv_obj_set_style_radius(bar, 5, 0);
+  lv_obj_set_style_bg_color(bar, C_RED, 0);
+  lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, 0);
+
+  wf.date = uiLabel(s, &font_m24, C_TEXT2, "");
+  lv_obj_set_pos(wf.date, L, 330);
+  wf.count = uiLabel(s, &font_m24, C_TEXT, "");
+  lv_obj_set_pos(wf.count, L, 391);
+  wfBattRow(s, R - 116, 388);
 }
 
 static void wfBuildSchool(lv_obj_t *s) {
   wf.time = wfCenter(s, &font_d64, C_TEXT, 26);
   wf.date = wfCenter(s, &font_m20, C_TEXT2, 104);
   lv_obj_t *card = uiBox(s);
-  lv_obj_set_size(card, UI_W - 2 * UI_PAD, 170);
-  lv_obj_set_pos(card, UI_PAD, 142);
+  lv_obj_set_size(card, UI_W - 2 * UI_PAD_WF, 170);
+  lv_obj_set_pos(card, UI_PAD_WF, 142);
   lv_obj_set_style_bg_color(card, C_SURFACE, 0);
   lv_obj_set_style_bg_opa(card, LV_OPA_COVER, 0);
   lv_obj_set_style_radius(card, 24, 0);
@@ -242,10 +258,10 @@ static void wfBuildSchool(lv_obj_t *s) {
   wf.noPlan = uiLabel(card, &font_m20, C_TEXT2, "Kein Stundenplan.\nIn der App senden.");
   lv_obj_set_pos(wf.noPlan, 0, 30);
   wf.count = uiLabel(s, &font_m24, C_YELLOW, "");
-  lv_obj_set_pos(wf.count, UI_PAD + 4, 334);
+  lv_obj_set_pos(wf.count, UI_PAD_WF + 4, 334);
   wf.session = uiLabel(s, &font_m24, C_CYAN, "");
-  lv_obj_set_pos(wf.session, UI_PAD + 4, 368);
-  wfBattRow(s, UI_PAD + 4, 420);
+  lv_obj_set_pos(wf.session, UI_PAD_WF + 4, 368);
+  wfBattRow(s, UI_PAD_WF + 4, 420);
 }
 
 static void wfBuild(lv_obj_t *s, int idx) {
@@ -339,8 +355,15 @@ static void wfUpdate(int idx) {
       uiSetTextFmt(wf.count, "%d Meldungen heute", totalHeute);
       break;
     case 4:
+      if (cachedH < 0) {
+        uiSetText(wf.hour, "--");
+        uiSetText(wf.minute, "--");
+      } else {
+        uiSetTextFmt(wf.hour, "%02d", cachedH);
+        uiSetTextFmt(wf.minute, "%02d", cachedM);
+      }
       uiSetText(wf.batt, pct >= 0 ? (snprintf(buf, sizeof(buf), "%d %%", pct), buf) : "");
-      uiSetTextFmt(wf.count, "%d Mel.", totalHeute);
+      uiSetTextFmt(wf.count, LV_SYMBOL_OK "  %d", totalHeute);
       break;
     case 5: {
       UiLesson l = uiLessonInfo();

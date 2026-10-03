@@ -607,6 +607,14 @@ bool btOn = false;
 
 // Sensor-Erkennung (IMU) an/aus (Energie sparen / Fehlmeldungen vermeiden)
 bool sensorOn = true;
+// Sensor laut Stundenplan automatisch an (Stunde) / aus (frei)
+bool autoSensor = false;
+static void setSensorOn(bool on);   // Vorabdeklaration (Definition weiter unten)
+// Akku-Test (akkutest.h): läuft er, ruhen Automatik und Tasten-Navigation
+bool akBusy = false;
+static bool akButton();
+static void akSerial(const String &line);
+static String akJson();
 
 // Umgebungsdaten (1 Hz aktualisiert, damit das Rendern flüssig bleibt)
 static int cachedH = -1, cachedM = -1, cachedS = -1;
@@ -645,6 +653,7 @@ static BLECharacteristic *pCharStats = nullptr;
 static BLECharacteristic *pCharClear = nullptr;
 static BLECharacteristic *pCharTT = nullptr;
 static BLECharacteristic *pCharLesson = nullptr;
+static BLECharacteristic *pCharAkku = nullptr;
 
 // WICHTIG: Eine BLE-Charakteristik ist auf ESP_GATT_MAX_ATTR_LEN (517 Bytes)
 // begrenzt. Deshalb wird die Statistik auf zwei Charakteristiken aufgeteilt,
@@ -762,6 +771,19 @@ static void updateEnv() {
     curWd = weekdayOf(cachedDay, cachedMon, 2000 + cachedYr);
     curP = findPeriod(curWd, cachedH, cachedM);
     inLesson = (curP >= 0);
+  }
+
+  // Sensor nur im Unterricht: geschaltet wird nur beim Wechsel Stunde <-> frei,
+  // ein manuelles Umschalten gilt also bis zum nächsten Stundenbeginn/-ende.
+  static int autoLastLesson = -1;   // -1 = noch nicht angewendet
+  if (autoSensor && !akBusy && curWd >= 0) {
+    int st = inLesson ? 1 : 0;
+    if (st != autoLastLesson) {
+      autoLastLesson = st;
+      if (sensorOn != inLesson) setSensorOn(inLesson);
+    }
+  } else {
+    autoLastLesson = -1;
   }
 
   // Session bei Stundenwechsel automatisch zurücksetzen (alte Session sichern)
@@ -1644,9 +1666,9 @@ static void clearCalibration() {
 // ---------------------------------------------------------------------------
 // Einstellungen
 // ---------------------------------------------------------------------------
-static void setSensorOn(bool on) {
+// Sensor schalten ohne zu speichern (der Akku-Test stellt den alten Zustand wieder her)
+static void sensorApply(bool on) {
   sensorOn = on;
-  prefs.putInt("sensorOn", on ? 1 : 0);
   if (on) {
     // Puffer leeren, damit beim Einschalten keine alte Bewegung ausgewertet wird
     bufHead = 0;
@@ -1658,6 +1680,11 @@ static void setSensorOn(bool on) {
     hochNichtCount = 0;
     hochMeldungCount = 0;
   }
+}
+
+static void setSensorOn(bool on) {
+  sensorApply(on);
+  prefs.putInt("sensorOn", on ? 1 : 0);
   USBSerial.printf("Sensor %s\n", on ? "AN" : "AUS");
 }
 
@@ -1665,6 +1692,12 @@ static void setMotorOn(bool on) {
   motorOn = on;
   prefs.putInt("motorOn", on ? 1 : 0);
   USBSerial.printf("Motor %s\n", on ? "AN" : "AUS");
+}
+
+static void setAutoSensor(bool on) {
+  autoSensor = on;
+  prefs.putInt("autoSensor", on ? 1 : 0);
+  USBSerial.printf("Sensor nur im Unterricht %s\n", on ? "AN" : "AUS");
 }
 
 static void setMuteInLessons(bool on) {
@@ -1679,6 +1712,7 @@ static void setMuteInLessons(bool on) {
 #define BLE_CHAR_CLEAR_UUID  "beb5483e-36e1-4688-b7f5-ea07361b26aa"
 #define BLE_CHAR_TT_UUID     "beb5483e-36e1-4688-b7f5-ea07361b26ab"
 #define BLE_CHAR_LESSON_UUID "beb5483e-36e1-4688-b7f5-ea07361b26ac"
+#define BLE_CHAR_AKKU_UUID   "beb5483e-36e1-4688-b7f5-ea07361b26ad"   // Akku-Test-Ergebnisse (JSON)
 
 // onWrite() läuft im Bluetooth-Task, nicht in loop(). I2C (RTC, PMU, Touch,
 // IMU), NVS und die Stundenplan-Arrays sind nicht für gleichzeitigen Zugriff
@@ -1756,12 +1790,14 @@ static void btEnable() {
     pCharClear = pService->createCharacteristic(BLE_CHAR_CLEAR_UUID, BLECharacteristic::PROPERTY_WRITE);
     pCharTT = pService->createCharacteristic(BLE_CHAR_TT_UUID, BLECharacteristic::PROPERTY_WRITE);
     pCharLesson = pService->createCharacteristic(BLE_CHAR_LESSON_UUID, BLECharacteristic::PROPERTY_READ);
+    pCharAkku = pService->createCharacteristic(BLE_CHAR_AKKU_UUID, BLECharacteristic::PROPERTY_READ);
     static MeldeBleCallbacks cbs;
     pCharTime->setCallbacks(&cbs);
     pCharClear->setCallbacks(&cbs);
     pCharTT->setCallbacks(&cbs);
     pCharStats->setValue(buildStatsJson().c_str());
     pCharLesson->setValue(buildLessonJson().c_str());
+    pCharAkku->setValue(akJson().c_str());
     pService->start();
     bleInited = true;
     BLEAdvertising *pAdv = BLEDevice::getAdvertising();
@@ -1857,6 +1893,7 @@ static void wakeFromStandby() {
 // powerBack(): Navigation, siehe ui_ctl.h
 
 static void powerShortPress() {
+  if (akButton()) return;   // laufender Akku-Test: Taste bricht ihn ab
   if (standby) {
     wakeFromStandby();
     return;
@@ -1865,6 +1902,7 @@ static void powerShortPress() {
 }
 
 static void bootPress() {
+  if (akButton()) return;
   if (alarmActive) {
     alarmStop();
     zeitTab = 0;
@@ -1877,6 +1915,7 @@ static void bootPress() {
 
 // Doppel-Klick auf BOOT: TISCH-Richtung neu lernen (Uhr liegt gerade auf dem Tisch).
 static void bootDoublePress() {
+  if (akButton()) return;
   USBSerial.println("[boot] Doppel-Klick -> TISCH neu kalibrieren");
   if (!calibrated) {
     USBSerial.println("[tisch] Noch nicht kalibriert - TISCH-Update ignoriert.");
@@ -2053,6 +2092,8 @@ static void handleSerial() {
           pinMode(PWR_KEY_PIN, INPUT);
           USBSerial.printf("Power-Taste (GPIO%d): %s\n", PWR_KEY_PIN,
                            digitalRead(PWR_KEY_PIN) ? "HIGH (gedrueckt)" : "LOW (losgelassen)");
+        } else if (line.startsWith("AKKU")) {
+          akSerial(line);
         } else if (line.startsWith("SCREEN ")) {
           // Maske direkt öffnen (Messung der Renderzeit ohne Bedienung)
           screen = line.substring(7).toInt();
@@ -2120,7 +2161,7 @@ static void handleSerial() {
             }
           }
         } else {
-          USBSerial.println("Unbekannt. Befehle: RESET, CAL, CALIB, STATS, BATT, BTN, SLEEP, VIB, SENSOR, STREAM, STOPSTREAM, RECSD, STOPSD, SDCHECK, TIME HH:MM:SS, DATE DD.MM.YY");
+          USBSerial.println("Unbekannt. Befehle: RESET, CAL, CALIB, STATS, BATT, BTN, SLEEP, VIB, SENSOR, STREAM, STOPSTREAM, RECSD, STOPSD, SDCHECK, AKKU, AKKULOG, AKKUSTART, AKKUSTOP, AKKUCLEAR, TIME HH:MM:SS, DATE DD.MM.YY");
         }
       }
       line = "";

@@ -3,6 +3,7 @@
 #endif
 #include "UhrMeldezaehler_core.h"
 #include "ui_ctl.h"
+#include "akkutest.h"
 #include "ui.h"
 
 void setup() {
@@ -18,6 +19,10 @@ void setup() {
   }
 
   USBSerial.begin(115200);
+  // Nicht warten, wenn niemand liest: Steckt die Uhr am PC, ohne dass ein
+  // Programm den Port öffnet, blockierte jede Log-Zeile bei vollem Puffer –
+  // die Hauptschleife hing dann bis zu 2 s (gemessen 02.10.2026).
+  USBSerial.setTxTimeoutMs(0);
   delay(300);
   USBSerial.println("\n=== MELDEZAEHLER Uhr-App ===");
 
@@ -74,7 +79,9 @@ void setup() {
   recTrialCounter = prefs.getInt("recTrial", 1000);
   motorOn = prefs.getInt("motorOn", 1) == 1;
   muteInLessons = prefs.getInt("muteLessons", 0) == 1;
+  autoSensor = prefs.getInt("autoSensor", 0) == 1;
   lastSession = prefs.getInt("lastSession", 0);
+  akLoad();
   // Erst ein Bild ins Panel, dann Licht an – sonst ist kurz der alte Panel-Speicher zu sehen
   if (halOk) {
     uiSync();
@@ -209,6 +216,7 @@ void loop() {
 
   // 3) Uhrzeit, Akku, Stunde, BLE-Werte
   updateEnv();
+  akUpdate();   // Akku-Test (Spannung messen, Meldungen simulieren)
 
   // 4) Oberfläche: Navigation + LVGL (Touch lesen, geänderte Flächen zeichnen).
   //    Im Standby/Streaming ruht die Oberfläche; Touch wird dann nicht gelesen.
