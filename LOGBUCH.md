@@ -409,3 +409,77 @@ Alle Werte `[perf]` auf der Uhr, Maskenwechsel per seriellem `SCREEN n`:
   Ergebnis 0,5 s versetzt. Die Perf-Analyse vom 01.10. lief mit Sensor aus.
 - 2 LVGL-Render-Einheiten (FreeRTOS) brachten keinen Gewinn – verworfen.
 - 240 MHz statt 160 MHz: Rendern ~25 % schneller; nicht übernommen (Akku).
+
+## 02.10.2026 – Feinschliff auf der Uhr, USB-Hänger behoben, Sensor-Automatik
+
+Erste Sitzung auf diesem Rechner (Windows): Git per winget installiert,
+`setup_libs.py` fand ohne arduino-cli-Konfigurationsdatei den
+Bibliotheksordner nicht (`config dump` liefert `{}`) – fragt jetzt
+`config get directories.user` ab.
+
+- **Seitenrand:** `UI_PAD` 20 → 32 px (~1 mm; Display hat ~12 px/mm) für alle
+  Masken; die Zifferblätter behalten 20 px (`UI_PAD_WF`).
+- **Timer mit Stunden:** drei Rollen (0–23 h, 0–59 min, 0–59 s), Höchstwert
+  23:59:59. Ab einer Stunde Restzeit Anzeige `H:MM:SS` in `font_d64`.
+- **Zifferblatt „Geometrisch“ neu:** Bauhaus-Stil – Stunden und Minuten
+  übereinander, gelber Kreis, blaues Quadrat, roter Balken; darunter Datum,
+  Meldungen (✓) und Akku. Lila Band und grüne Pille entfernt.
+- **Hänger bis 2 s behoben:** Steckte die Uhr am PC, ohne dass ein Programm
+  den seriellen Port las, blockierte jede Log-Zeile bei vollem Puffer.
+  Gemessen bei 20 s geschlossenem Port: `max loop` 2 005 481 µs → 2–6 ms nach
+  `USBSerial.setTxTimeoutMs(0)` (Zeilen werden dann verworfen). Beim Messen
+  hatte bisher immer ein Programm den Port offen, daher fiel es nie auf.
+- **Einstellung „Nur im Unterricht“** (`autoSensor`, NVS `autoSensor`):
+  Sensor laut Stundenplan bei Stundenbeginn an, bei Stundenende aus.
+  Geschaltet wird nur beim Wechsel, manuelles Umschalten gilt bis zum
+  nächsten Wechsel. Ohne Stundenplan passiert nichts (Hinweis in Amber).
+  Auf der Uhr noch nicht über einen echten Stundenwechsel geprüft.
+- Kompiliert (Flash 67 %) und geflasht ✅.
+
+## 02.10.2026 (Fortsetzung) – App „Akku-Test“
+
+Ziel: Verbrauch je Komponente bestimmen. Der AXP2101 misst nur die Spannung,
+keinen Strom – der Verbrauch ergibt sich aus Läufen, die sich nur in einer
+Komponente unterscheiden.
+
+- **Neue Datei `akkutest.h`**, Maske `UI_AKKU` (Screen 11), sechste Kachel
+  unter Apps (Kachelraster jetzt 3 × 2).
+- **Einstellen:** Dauer (Stunden/Minuten), Sensor, Display, Vibration,
+  Anzahl simulierter Meldungen. Steckt USB, wartet der Test, bis das Kabel
+  ab ist (beim Laden wäre die Messung wertlos).
+- **Lauf:** Spannung 1×/s, Mittel pro Minute; Minutenwerte auf SD
+  (`/akkutest.csv`). Display an: alle 8 s eine Maske weiter (nur Anzeigen).
+  Touch gesperrt, Abbruch per Power-/BOOT-Taste. Simulierte Meldungen werden
+  gespeichert und vibrieren, zählen aber nicht in die Tagesstatistik.
+  Einstellungen werden danach wiederhergestellt (`sensorApply()` schaltet den
+  Sensor ohne NVS-Schreiben).
+- **Ergebnis:** % pro Stunde und hochgerechnete Laufzeit, letzte 8 in NVS;
+  Zwischenstand alle 5 min, damit ein leerer Akku den Test nicht verliert.
+  Gültig erst ab 5 min.
+- **Ausgabe:** seriell `AKKU`, `AKKULOG`, `AKKUSTART`, `AKKUSTOP`,
+  `AKKUCLEAR`; BLE-Charakteristik `…26ad` (JSON); PC-Skript
+  `tools/akkutest.py` mit Anteil je Verbraucher. Handy-App noch nicht
+  angepasst (Flutter auf diesem Rechner nicht installiert).
+- Auf der Uhr per seriellem Befehl geprüft: Warten auf USB, Abbruch,
+  2-min-Lauf mit Maskenwechsel und 2 Meldungen, SD-Log, Auslesen ✅.
+- Grenzen: Prozent aus allgemeiner LiPo-Kurve (1 % ≈ 5–12 mV); nach einem
+  Lastwechsel sackt die Spannung ab, die erste Minute als Startwert
+  überschätzt den Verbrauch etwas.
+
+## 03.10.2026 – Energietest 1: Grundbedarf des Boards
+
+Eigenes Programm `Energietests/Test1_Grundbedarf/` (ersetzt während des Tests
+die Firmware; Anleitung im README dort).
+
+- ESP32 im Deep-Sleep, alles andere aus (Display Sleep In, Touch Hibernate,
+  QMI8658 aus, DC4 aus, kein Funk). Weckt alle 10 min, misst die
+  Akkuspannung (AXP2101, 1 mV, 16 Lesungen) und speichert sie mit
+  RTC-Zeit im RTC-RAM (700 Werte ≈ 116 h).
+- Power-Taste: misst und zeigt 3 s gedimmt Spannung, Messungen, Änderung.
+  Am USB-Kabel bleibt die Uhr wach: `DUMP`, `STAT`, `CLEAR`, `INTERVALL n`,
+  `SCHLAF`. Abziehen startet die Messreihe.
+- Gefunden: Öffnen/Schließen des seriellen Ports setzt den Chip zurück;
+  `RTC_DATA_ATTR` wird dabei neu belegt → Werte jetzt `RTC_NOINIT_ATTR`.
+- Auf der Uhr geprüft: Schlaf (USB-Port nach 1 s weg), Timer-Wecken nach
+  60 s, Werte bleiben erhalten ✅. Die 16 Lesungen sind immer gleich – die
+  effektive Auflösung bleibt 1 mV. Wecken per Power-Taste noch offen.
