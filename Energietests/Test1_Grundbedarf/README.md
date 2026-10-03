@@ -42,6 +42,8 @@ aufgezeichnet; aus ihrem Abfall ergibt sich der Grundbedarf.
 | `STAT` | Anzahl, Intervall, Weck-/Resetgrund, aktuelle Spannung |
 | `CLEAR` | Messungen löschen |
 | `INTERVALL n` | Messabstand in Minuten (1–240, Standard 10) |
+| `TASTENWECKEN 0/1` | Wecken per Power-Taste aus/an (Standard an, kostet ~70 µA, s. u.) |
+| `TASTE` | 20 s lang GPIO10 und die Tasten-Interrupts des AXP2101 anzeigen |
 | `SCHLAF` | sofort schlafen (zum Prüfen des Weckens am Kabel) |
 
 `grund`: `start` (Kaltstart), `timer`, `taste`, `abgezogen` (Beginn der Reihe).
@@ -55,10 +57,20 @@ Messungen mit `usb=1` sind wertlos (Akku lädt).
   derselben Größenordnung.
 - Jedes Aufwachen (~0,1–0,2 s) und jede Tastenanzeige (3 s Display) gehören
   mit zum gemessenen Bedarf.
+- **Power-Taste und GPIO10:** Die Platine zieht GPIO10 in Ruhe aktiv auf LOW
+  und lässt beim Drücken nur los – HIGH entsteht erst durch einen Pull-up.
+  Ohne Pull-up bleibt der Pin immer 0 (die Taste weckte deshalb anfangs
+  nicht). Im Schlaf ist deshalb der interne RTC-Pull-up an; er zieht in Ruhe
+  dauerhaft grob 70 µA (3,3 V / ~45 kΩ) und hält die RTC-Peripherie wach.
+  Für eine reine Grundlast-Messung `TASTENWECKEN 0` setzen (dann nur Timer)
+  oder den Anteil abziehen.
+- Ein IRQ-Ausgang des AXP2101 an einem freien ESP-Pin wurde nicht gefunden
+  (geprüft: GPIO 13, 16, 17, 21, 38–48); Tastendrücke sieht der ESP sonst nur
+  per I2C.
 - Für µA-genaue Werte: Multimeter in Reihe mit dem Akku.
 
 ## Geprüft (03.10.2026)
 
 Am Kabel: Schlaf (USB-Port nach 1 s weg), Timer-Wecken nach 60 s
 (Weckgrund 4, Reset 8), Messwerte bleiben erhalten. Wecken per Power-Taste
-noch nicht bestätigt.
+nach 212 s Schlaf (Weckgrund 3 = EXT1, Messung „taste“) ✅.

@@ -483,3 +483,19 @@ die Firmware; Anleitung im README dort).
 - Auf der Uhr geprüft: Schlaf (USB-Port nach 1 s weg), Timer-Wecken nach
   60 s, Werte bleiben erhalten ✅. Die 16 Lesungen sind immer gleich – die
   effektive Auflösung bleibt 1 mV. Wecken per Power-Taste noch offen.
+
+### 03.10.2026 (Fortsetzung) – Power-Taste weckte nicht
+
+- Befund: Im Schlaf reagierte die Power-Taste nicht. Langes Drücken schaltete
+  den AXP2101 ab, der RTC-RAM ging verloren; beim Anstecken startete die Uhr
+  neu.
+- Diagnose (`TASTE`, Pin-Suche): Der AXP2101 meldet jeden Druck per I2C
+  (Interrupts fallend/steigend/kurz). GPIO10 zeigt den Druck **nur mit
+  Pull-up**: In Ruhe zieht die Platine den Pin aktiv auf LOW, beim Drücken
+  lässt sie los. Ohne Pull-up bleibt er immer 0 – deshalb weckte EXT1 nie.
+  Das betrifft wahrscheinlich auch den Deep-Sleep der Meldezähler-Firmware
+  (dort weckte vermutlich nur der 3-s-Abfrage-Timer).
+- Kein IRQ-Ausgang des AXP2101 an einem freien ESP-Pin gefunden.
+- Fix im Energietest: RTC-Pull-up an GPIO10 im Schlaf, EXT1 auf HIGH.
+  Geprüft: Wecken per Taste nach 212 s Schlaf ✅. Kosten: dauerhaft grob
+  70 µA durch den Pull-up – abschaltbar mit `TASTENWECKEN 0`.

@@ -26,6 +26,7 @@
 #include "HWCDC.h"
 #include "Arduino_GFX_Library.h"
 #include "driver/gpio.h"
+#include "driver/rtc_io.h"
 #define XPOWERS_CHIP_AXP2101
 #include "XPowersLib.h"
 
@@ -74,6 +75,7 @@ RTC_NOINIT_ATTR static uint32_t magic;
 RTC_NOINIT_ATTR static uint16_t recN;
 RTC_NOINIT_ATTR static uint16_t intervalMin;
 RTC_NOINIT_ATTR static uint32_t wakeCount;
+RTC_NOINIT_ATTR static uint8_t keyWake;   // 1 = Power-Taste weckt (kostet Pull-up-Strom, s. goSleep)
 RTC_NOINIT_ATTR static Rec recs[REC_MAX];
 static esp_sleep_wakeup_cause_t wakeCause;
 static esp_reset_reason_t resetReason;
@@ -194,10 +196,16 @@ static void showLast() {
 
 static void goSleep() {
   pmu.clearIrqStatus();
-  // Power-Taste weckt sofort (Ruhepegel des SYS_OUT-Pins automatisch erkennen)
-  pinMode(PWR_KEY_PIN, INPUT);
-  bool idleHigh = digitalRead(PWR_KEY_PIN);
-  esp_sleep_enable_ext1_wakeup(1ULL << PWR_KEY_PIN, idleHigh ? ESP_EXT1_WAKEUP_ANY_LOW : ESP_EXT1_WAKEUP_ANY_HIGH);
+  // Power-Taste: Die Platine zieht GPIO10 in Ruhe aktiv auf LOW und lässt beim
+  // Drücken los – HIGH entsteht nur mit Pull-up (gemessen 03.10.2026; ohne
+  // Pull-up bleibt der Pin immer 0). Der interne Pull-up (~45 kOhm) zieht
+  // deshalb in Ruhe dauerhaft ~70 µA – für reine Grundlast-Messungen abschaltbar.
+  if (keyWake) {
+    esp_sleep_enable_ext1_wakeup(1ULL << PWR_KEY_PIN, ESP_EXT1_WAKEUP_ANY_HIGH);
+    esp_sleep_pd_config(ESP_PD_DOMAIN_RTC_PERIPH, ESP_PD_OPTION_ON);   // Pull-ups brauchen RTC-Peripherie
+    rtc_gpio_pullup_en((gpio_num_t)PWR_KEY_PIN);
+    rtc_gpio_pulldown_dis((gpio_num_t)PWR_KEY_PIN);
+  }
   esp_sleep_enable_timer_wakeup((uint64_t)intervalMin * 60ULL * 1000000ULL);
   // Reset-Leitungen von Display und Touch festhalten, sonst wachen sie beim
   // Neustart des ESP32 aus dem Ruhezustand auf
@@ -227,12 +235,41 @@ static void dump() {
 }
 
 static void stat() {
-  USBSerial.printf("Messungen: %u / %u, Intervall %u min, Weckvorgaenge %lu, Weckgrund %d, Reset %d\n", recN,
-                   REC_MAX, intervalMin, (unsigned long)wakeCount, (int)wakeCause, (int)resetReason);
+  USBSerial.printf("Messungen: %u / %u, Intervall %u min, Tastenwecken %s, Weckvorgaenge %lu, Weckgrund %d, Reset %d\n",
+                   recN, REC_MAX, intervalMin, keyWake ? "an" : "aus", (unsigned long)wakeCount, (int)wakeCause,
+                   (int)resetReason);
   uint8_t sp;
   uint16_t now = measure(sp);
   USBSerial.printf("Jetzt: %u.%u mV (Streuung %u mV), USB=%d, laedt=%d\n", now / 10, now % 10, sp, pmu.isVbusIn(),
                    pmu.isCharging());
+}
+
+// Diagnose: 20 s lang GPIO10 und die PEK-Interrupts des AXP2101 beobachten
+static void keyDiag() {
+  USBSerial.println("Jetzt die Power-Taste kurz druecken (20 s) ...");
+  pinMode(PWR_KEY_PIN, INPUT_PULLUP);   // ohne Pull-up bleibt GPIO10 immer 0
+  pmu.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ | XPOWERS_AXP2101_PKEY_LONG_IRQ |
+                XPOWERS_AXP2101_PKEY_POSITIVE_IRQ | XPOWERS_AXP2101_PKEY_NEGATIVE_IRQ);
+  pmu.clearIrqStatus();
+  int last = -1;
+  unsigned long t0 = millis();
+  while (millis() - t0 < 20000) {
+    int v = digitalRead(PWR_KEY_PIN);
+    if (v != last) {
+      USBSerial.printf("%5lu ms  GPIO10=%d\n", millis() - t0, v);
+      last = v;
+    }
+    pmu.getIrqStatus();
+    if (pmu.isPekeyShortPressIrq() || pmu.isPekeyLongPressIrq() || pmu.isPekeyPositiveIrq() ||
+        pmu.isPekeyNegativeIrq()) {
+      USBSerial.printf("%5lu ms  AXP: kurz=%d lang=%d steigend=%d fallend=%d\n", millis() - t0,
+                       pmu.isPekeyShortPressIrq(), pmu.isPekeyLongPressIrq(), pmu.isPekeyPositiveIrq(),
+                       pmu.isPekeyNegativeIrq());
+      pmu.clearIrqStatus();
+    }
+    delay(5);
+  }
+  USBSerial.println("--- ende ---");
 }
 
 static void usbMode() {
@@ -240,7 +277,7 @@ static void usbMode() {
   USBSerial.setTxTimeoutMs(0);
   showStatus("USB", "Auslesen: DUMP", "Abziehen = Start");
   delay(1500);
-  USBSerial.println("\n=== AKKU-GRUNDLAST ===  Befehle: DUMP, STAT, CLEAR, INTERVALL n, SCHLAF");
+  USBSerial.println("\n=== AKKU-GRUNDLAST ===  Befehle: DUMP, STAT, CLEAR, INTERVALL n, TASTENWECKEN 0|1, TASTE, SCHLAF");
   stat();
   String line;
   unsigned long offSince = 0;
@@ -251,7 +288,11 @@ static void usbMode() {
       line.trim();
       if (line == "DUMP") dump();
       else if (line == "STAT") stat();
-      else if (line == "CLEAR") { recN = 0; USBSerial.println("OK geloescht"); }
+      else if (line == "TASTE") keyDiag();
+      else if (line.startsWith("TASTENWECKEN ")) {
+        keyWake = line.substring(13).toInt() ? 1 : 0;
+        USBSerial.printf("Tastenwecken %s\n", keyWake ? "AN (~70 uA Pull-up)" : "AUS (nur Timer)");
+      } else if (line == "CLEAR") { recN = 0; USBSerial.println("OK geloescht"); }
       else if (line.startsWith("INTERVALL ")) {
         int n = line.substring(10).toInt();
         if (n >= 1 && n <= 240) intervalMin = n;
@@ -259,7 +300,7 @@ static void usbMode() {
       } else if (line == "SCHLAF") {
         displayOff();
         goSleep();
-      } else if (line.length()) USBSerial.println("Befehle: DUMP, STAT, CLEAR, INTERVALL n, SCHLAF");
+      } else if (line.length()) USBSerial.println("Befehle: DUMP, STAT, CLEAR, INTERVALL n, TASTENWECKEN 0|1, TASTE, SCHLAF");
       line = "";
     }
     // Kabel ab (2 s stabil) -> Messreihe beginnt
@@ -297,7 +338,7 @@ void setup() {
   pmu.enableVbusVoltageMeasure();
   wakeCount++;
 
-  bool valid = magic == MAGIC && recN <= REC_MAX && intervalMin >= 1 && intervalMin <= 240;
+  bool valid = magic == MAGIC && recN <= REC_MAX && intervalMin >= 1 && intervalMin <= 240 && keyWake <= 1;
   bool cold = !valid || (cause != ESP_SLEEP_WAKEUP_TIMER && cause != ESP_SLEEP_WAKEUP_EXT1);
   if (cold) {
     if (!valid) {   // Speicher nach Stromausfall ungültig
@@ -305,6 +346,7 @@ void setup() {
       recN = 0;
       intervalMin = 10;
       wakeCount = 1;
+      keyWake = 1;
     }
     pmu.disableIRQ(XPOWERS_AXP2101_ALL_IRQ);
     pmu.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ);
