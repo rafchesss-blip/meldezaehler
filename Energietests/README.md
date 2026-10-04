@@ -9,8 +9,10 @@ dasselbe Partitionsschema (`huge_app`) verwendet wird.
 | Test | Ordner | misst |
 |---|---|---|
 | 1 | `Test1_Grundbedarf/` | Grundbedarf des Boards: alles aus, ESP32 im Deep-Sleep |
+| 2 | `Test2_Display/` | Display an, alle 0,5 s Schachbrett/Farbverlauf + Akkuspannung, ESP32 im Light-Sleep |
+| 3 | `Test3_Bewegungssensor/` | QMI8658 wie in der Firmware, 100 Lesungen/s (verworfen), Display aus, ESP32 im Light-Sleep |
 
-Bauen und flashen (Port anpassen):
+Bauen und flashen (Port und Testordner anpassen, hier Test 1):
 
 ```
 arduino-cli compile --fqbn esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=huge_app,PSRAM=disabled Energietests/Test1_Grundbedarf

@@ -499,3 +499,43 @@ die Firmware; Anleitung im README dort).
 - Fix im Energietest: RTC-Pull-up an GPIO10 im Schlaf, EXT1 auf HIGH.
   Geprüft: Wecken per Taste nach 212 s Schlaf ✅. Kosten: dauerhaft grob
   70 µA durch den Pull-up – abschaltbar mit `TASTENWECKEN 0`.
+
+## 03./04.10.2026 – Energietest 2: Display, Datenverlust, Flash-Sicherung
+
+- **Test 2** (`Energietests/Test2_Display/`): Display an, ESP32 zeichnet kurz
+  und schläft dazwischen im Light-Sleep (80 MHz). Erster Lauf mit einer hellen
+  Vollfarbe je Sekunde (54 min, 3222 Bilder): ≈ 55 mV/h gegenüber ≈ 5 mV/h
+  Grundlast, unsicher ±30 %. Danach umgebaut: alle 0,5 s Schachbrett oder
+  Farbverlauf, in der Mitte immer die aktuelle Akkuspannung (Feld wird vom
+  Muster ausgespart), Messung immer beim selben Muster – auch die erste nach
+  dem Abziehen (vorher ohne Last gemessen).
+- **Datenverlust:** Der Lauf in der Nacht lief bis 2,9 V; der AXP2101 schaltete
+  ab, der RTC-RAM war leer. Ob die Abschaltung bei 3,45 V ausgelöst hat, ist
+  nicht mehr feststellbar.
+- **Flash-Sicherung in Test 1 und 2:** jeder Messwert zusätzlich per LittleFS
+  auf der ungenutzten `spiffs`-Partition (896 KB; die Firmware nutzt nur NVS,
+  das mit 20 KB zu knapp wäre). Einstellungen atomar per Umbenennen.
+  Abschaltschwelle Test 2 jetzt 3,55 V. Geprüft mit `STROMAUSFALL`:
+  Messungen und Einstellungen kommen zurück ✅.
+- Datenblatt ESP32-S3 (Tab. 5-9/5-10): 80/160/240 MHz im Leerlauf 22,0/27,6/
+  32,9 mA, Light-Sleep 240 µA (+ PSRAM), Deep-Sleep 7–8 µA. Arduino-Core:
+  `loop()` auf Kern 1, BLE/esp_timer auf Kern 0, FreeRTOS 10.5.1, kein
+  automatisches Stromsparen (`CONFIG_PM_ENABLE` aus).
+
+## 04.10.2026 – Energietest 2 ausgewertet, Energietest 3: Bewegungssensor
+
+- **Test 2, Musterlauf** (`messungen/2026-10-04_hell255_muster.csv`): 4,08 h
+  ohne Kabel, 29 457 Bilder, 4101 → 3791 mV, gleichmäßig ≈ 76 mV/h (Grundlast
+  ≈ 5 mV/h). Grob hochgerechnet über eine allgemeine LiPo-Kurve: ≈ 9 %/h,
+  also ≈ 9–11 h Laufzeit bei Helligkeit 255 und hellen Mustern.
+- **Test 3** (`Energietests/Test3_Bewegungssensor/`): QMI8658 wie `qmiInit()`
+  der Firmware, ESP32 liest alle 10 ms 12 Bytes und verwirft sie, dazwischen
+  Light-Sleep; Display aus. Flash-Sicherung (`/test3.*`) und Power-Taste wie
+  in Test 2.
+- Gefunden: Nach Test 2 stand im QMI8658 noch CTRL1 Bit 0 (Oszillator aus) –
+  der Soft-Reset löschte es nicht, alle Werte 0. Danach einmal fehlendes
+  Auto-Increment (sechs gleiche Werte). Jetzt CTRL1 ausdrücklich setzen und
+  die Einstellung zurücklesen. Betrifft möglicherweise auch `qmiInit()` der
+  Firmware nach einem Energietest.
+- Geprüft am Kabel: 100 Lesungen/s, 0 Fehler, Werte plausibel;
+  `STROMAUSFALL` ✅. Lauf ohne Kabel steht aus.
