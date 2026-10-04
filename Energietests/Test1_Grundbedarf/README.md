@@ -19,7 +19,9 @@ aufgezeichnet; aus ihrem Abfall ergibt sich der Grundbedarf.
   (in der Praxis sind alle 16 gleich – effektiv also 1 mV)
 - Zeitstempel aus der externen RTC (PCF85063)
 - Speicher: RTC-RAM (`RTC_NOINIT_ATTR`), 700 Messungen ≈ 116 h bei 10 min.
-  Übersteht Deep-Sleep und Resets, **nicht** aber einen Stromausfall.
+  Übersteht Deep-Sleep und Resets. **Zusätzlich wird jeder Messwert im
+  Flash gesichert** (LittleFS, `/test1.bin` + `/test1.cfg`) und nach einem
+  Stromausfall zurückgeladen.
 
 ## Ablauf
 
@@ -40,7 +42,7 @@ aufgezeichnet; aus ihrem Abfall ergibt sich der Grundbedarf.
 |---|---|
 | `DUMP` | alle Messungen als CSV: `nr,zeit,stunden,mv,streuung_mv,grund,usb,laedt` |
 | `STAT` | Anzahl, Intervall, Weck-/Resetgrund, aktuelle Spannung |
-| `CLEAR` | Messungen löschen |
+| `CLEAR` | Messungen in RTC-RAM und Flash löschen |
 | `INTERVALL n` | Messabstand in Minuten (1–240, Standard 10) |
 | `TASTENWECKEN 0/1` | Wecken per Power-Taste aus/an (Standard an, kostet ~70 µA, s. u.) |
 | `TASTE` | 20 s lang GPIO10 und die Tasten-Interrupts des AXP2101 anzeigen |

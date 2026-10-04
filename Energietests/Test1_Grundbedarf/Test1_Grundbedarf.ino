@@ -29,6 +29,7 @@
 #include "driver/rtc_io.h"
 #define XPOWERS_CHIP_AXP2101
 #include "XPowersLib.h"
+#include <LittleFS.h>
 
 HWCDC USBSerial;
 XPowersPMU pmu;
@@ -77,6 +78,72 @@ RTC_NOINIT_ATTR static uint16_t intervalMin;
 RTC_NOINIT_ATTR static uint32_t wakeCount;
 RTC_NOINIT_ATTR static uint8_t keyWake;   // 1 = Power-Taste weckt (kostet Pull-up-Strom, s. goSleep)
 RTC_NOINIT_ATTR static Rec recs[REC_MAX];
+// --- Sicherung im Flash (LittleFS auf der freien spiffs-Partition) ----------
+// Jeder Messwert wird zusätzlich an /test1.bin angehängt, die Einstellungen
+// stehen in /test1.cfg. Nach einem Stromausfall (RTC-RAM gelöscht) lädt
+// setup() beides zurück. LittleFS übersteht Stromausfälle beim Schreiben.
+struct Cfg {
+  uint32_t magic;
+  uint16_t intervalMin;
+  uint8_t keyWake;
+};
+
+static bool fsOk = false;
+
+static bool fsBegin() {
+  if (!fsOk) fsOk = LittleFS.begin(true);   // true = beim ersten Mal formatieren
+  return fsOk;
+}
+
+static void fsAppend(const Rec &r) {
+  if (!fsBegin()) return;
+  File f = LittleFS.open("/test1.bin", "a");
+  if (!f) return;
+  f.write((const uint8_t *)&r, sizeof(r));
+  f.close();
+}
+
+static void saveCfg() {
+  if (!fsBegin()) return;
+  Cfg c;
+  c.magic = MAGIC;
+  c.intervalMin = intervalMin;
+  c.keyWake = keyWake;
+  File f = LittleFS.open("/test1.cfg.tmp", "w");
+  if (!f) return;
+  f.write((const uint8_t *)&c, sizeof(c));
+  f.close();
+  LittleFS.rename("/test1.cfg.tmp", "/test1.cfg");   // Umbenennen ist atomar
+}
+
+// true = Sicherung gefunden und übernommen
+static bool fsLoad() {
+  if (!fsBegin()) return false;
+  File f = LittleFS.open("/test1.cfg", "r");
+  if (!f) return false;
+  Cfg c;
+  bool ok = f.read((uint8_t *)&c, sizeof(c)) == sizeof(c) && c.magic == MAGIC;
+  f.close();
+  if (!ok) return false;
+  intervalMin = c.intervalMin;
+  keyWake = c.keyWake;
+  recN = 0;
+  File l = LittleFS.open("/test1.bin", "r");
+  if (l) {
+    size_t n = l.size() / sizeof(Rec);
+    if (n > REC_MAX) n = REC_MAX;
+    recN = l.read((uint8_t *)recs, n * sizeof(Rec)) / sizeof(Rec);
+    l.close();
+  }
+  return true;
+}
+
+static void fsClear() {
+  if (!fsBegin()) return;
+  LittleFS.remove("/test1.bin");
+  LittleFS.remove("/test1.cfg");
+}
+
 static esp_sleep_wakeup_cause_t wakeCause;
 static esp_reset_reason_t resetReason;
 
@@ -139,6 +206,7 @@ static void record(uint8_t why) {
   r.mv10 = measure(r.spread);
   r.flags = why | (pmu.isVbusIn() ? F_VBUS : 0) | (pmu.isCharging() ? F_CHARGE : 0) | (r.t ? 0 : F_NORTC);
   recN++;
+  fsAppend(r);
 }
 
 // Alle Verbraucher außer der Uhrzeit abschalten (nur beim Kaltstart nötig,
@@ -291,11 +359,17 @@ static void usbMode() {
       else if (line == "TASTE") keyDiag();
       else if (line.startsWith("TASTENWECKEN ")) {
         keyWake = line.substring(13).toInt() ? 1 : 0;
+        saveCfg();
         USBSerial.printf("Tastenwecken %s\n", keyWake ? "AN (~70 uA Pull-up)" : "AUS (nur Timer)");
-      } else if (line == "CLEAR") { recN = 0; USBSerial.println("OK geloescht"); }
-      else if (line.startsWith("INTERVALL ")) {
+      } else if (line == "CLEAR") {
+        recN = 0;
+        fsClear();
+        saveCfg();
+        USBSerial.println("OK geloescht");
+      } else if (line.startsWith("INTERVALL ")) {
         int n = line.substring(10).toInt();
         if (n >= 1 && n <= 240) intervalMin = n;
+        saveCfg();
         USBSerial.printf("Intervall %u min\n", intervalMin);
       } else if (line == "SCHLAF") {
         displayOff();
@@ -341,12 +415,15 @@ void setup() {
   bool valid = magic == MAGIC && recN <= REC_MAX && intervalMin >= 1 && intervalMin <= 240 && keyWake <= 1;
   bool cold = !valid || (cause != ESP_SLEEP_WAKEUP_TIMER && cause != ESP_SLEEP_WAKEUP_EXT1);
   if (cold) {
-    if (!valid) {   // Speicher nach Stromausfall ungültig
+    if (!valid) {   // nach Stromausfall: Sicherung aus dem Flash, sonst Standardwerte
       magic = MAGIC;
-      recN = 0;
-      intervalMin = 10;
       wakeCount = 1;
-      keyWake = 1;
+      if (!fsLoad()) {
+        recN = 0;
+        intervalMin = 10;
+        keyWake = 1;
+        saveCfg();
+      }
     }
     pmu.disableIRQ(XPOWERS_AXP2101_ALL_IRQ);
     pmu.enableIRQ(XPOWERS_AXP2101_PKEY_SHORT_IRQ);
