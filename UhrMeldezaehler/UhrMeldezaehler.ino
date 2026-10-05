@@ -164,6 +164,46 @@ void setup() {
 }
 
 // ---------------------------------------------------------------------------
+// Light-Sleep im Standby: Statt loop() ununterbrochen drehen zu lassen, schläft
+// der ESP32 bis zur nächsten Sensorlesung (≤ 10 ms) bzw. bis zum Ende eines
+// Vibrationspulses. millis()/micros() laufen im Light-Sleep weiter; Motor-Pin
+// und Display-Chipselect werden im Schlaf gehalten. Nur ohne BLE (Light-Sleep
+// trennt die Verbindung) und ohne USB (die serielle Konsole bräche ab).
+// Geschlafen wird nur, während das CNN nicht rechnet (≈ 30 % der Zeit).
+// ---------------------------------------------------------------------------
+#define NAP_MAX_US 20000   // ohne Sensor höchstens 20 ms (Timer, Wecker, Tasten)
+
+static void lightSleepIfIdle() {
+  static bool usbPresent = true;   // bis zur ersten Abfrage wach bleiben
+  static unsigned long lastUsbCheckMs = 0;
+  unsigned long nowMs = millis();
+  if (nowMs - lastUsbCheckMs >= 500) {   // I2C-Abfrage am AXP2101 nur 2x/s
+    lastUsbCheckMs = nowMs;
+    usbPresent = pmu.isVbusIn();
+  }
+  if (!standby || btOn || usbPresent || streamMode || sensorRec) return;
+  // Light-Sleep hält beide Kerne an – solange das CNN auf Kern 0 rechnet
+  // (≈ 0,34 s je Auswertung alle 0,5 s), wach bleiben
+  if (cnnBusy) return;
+
+  long waitUs = NAP_MAX_US;
+  if (sensorOn) waitUs = (long)(nextSampleUs - micros());
+  if (vibPhaseOn || vibPulsesLeft > 0) {
+    long v = (long)(vibNextMs - millis()) * 1000L;
+    if (v < waitUs) waitUs = v;
+  }
+  if (waitUs > NAP_MAX_US) waitUs = NAP_MAX_US;
+  if (waitUs < 1000) return;   // lohnt nicht
+
+  gpio_hold_en((gpio_num_t)LCD_CS);
+  gpio_hold_en((gpio_num_t)18);   // Motor
+  esp_sleep_enable_timer_wakeup((uint64_t)waitUs);
+  esp_light_sleep_start();
+  gpio_hold_dis((gpio_num_t)LCD_CS);
+  gpio_hold_dis((gpio_num_t)18);
+}
+
+// ---------------------------------------------------------------------------
 // Loop
 // ---------------------------------------------------------------------------
 void loop() {
@@ -261,4 +301,7 @@ void loop() {
       uiMaxUs = 0;
     }
   }
+
+  // 8) Stromsparen: im Standby bis zur nächsten Sensorlesung schlafen
+  lightSleepIfIdle();
 }

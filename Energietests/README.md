@@ -11,6 +11,7 @@ dasselbe Partitionsschema (`huge_app`) verwendet wird.
 | 1 | `Test1_Grundbedarf/` | Grundbedarf des Boards: alles aus, ESP32 im Deep-Sleep |
 | 2 | `Test2_Display/` | Display an, alle 0,5 s Schachbrett/Farbverlauf + Akkuspannung, ESP32 im Light-Sleep |
 | 3 | `Test3_Bewegungssensor/` | QMI8658 wie in der Firmware, 100 Lesungen/s (verworfen), Display aus, ESP32 im Light-Sleep |
+| 4 | `Test4_Motor/` | Motorversorgung DC4 an, Motor 120 ms je Sekunde; Sensor und Display aus, ESP32 im Light-Sleep |
 
 Bauen und flashen (Port und Testordner anpassen, hier Test 1):
 

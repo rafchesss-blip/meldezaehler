@@ -539,3 +539,37 @@ die Firmware; Anleitung im README dort).
   Firmware nach einem Energietest.
 - Geprüft am Kabel: 100 Lesungen/s, 0 Fehler, Werte plausibel;
   `STROMAUSFALL` ✅. Lauf ohne Kabel steht aus.
+
+## 05.10.2026 – Test 3 ausgewertet, Energietest 4: Motor, Light-Sleep in der Firmware
+
+- **Test 3, Lauf ohne Kabel** (`messungen/2026-10-04_rate100.csv`): 13,9 h,
+  4 987 218 Lesungen, 0 Fehler, 4108 → 3848 mV, ≈ 18–19 mV/h (Grundlast
+  ≈ 5 mV/h). Hochgerechnet ≈ 35–45 h Laufzeit (Sensor 100 Hz, ESP32 im
+  Light-Sleep, Display aus). Accel und Gyro waren an (CTRL7 = 03).
+- **Test 4** (`Energietests/Test4_Motor/`): Motorversorgung DC4 dauerhaft an
+  (1,8 V) wie in der Firmware, Motor 120 ms je Sekunde (= `vibrate(120)`),
+  Sensor und Display aus, ESP32 im Light-Sleep, Pulse gezählt. Spannung immer
+  kurz vor einem Puls gemessen. DC4-Leerlauf und Pulse bewusst nicht getrennt.
+- **Ergebnis** (`messungen/2026-10-05_puls120_takt1000.csv`): 3,0 h, 10 879
+  Pulse, 4107 → 4040 mV; im Abschnitt 1–3 h ≈ 15 mV/h (Test 3 im gleichen
+  Spannungsbereich ≈ 13 mV/h). Motor samt DC4 grob 5–8 mV/h über der
+  Grundlast → ≤ 0,002 mV je Vibration. Bei 20–100 Vibrationen/h
+  vernachlässigbar (< 1 % des Verbrauchs).
+- Wichtig für Vergleiche: mV/h hängt stark vom Spannungsbereich ab; direkt
+  nach dem Laden fällt die Spannung in der ersten Stunde 30–40 mV/h schneller.
+  Nur gleiche Abschnitte vergleichen.
+- **Abschätzung** (≈ 8 mV je 1 %, Akku ≈ 300 mAh angenommen): Alles an
+  (Display 255 hell, ESP32 wach, BLE, Sensor) ≈ 23 %/h ≈ 4,5 h. Größte
+  Posten: ESP32 dauerhaft wach (≈ 44 %) und Display (≈ 37 %).
+- **Befund Firmware:** `loop()` dreht ohne Pause bei 160 MHz, auch im Standby;
+  Deep-Sleep nur bei Sensor und BLE aus (`enterDeepSleep()` weckt dabei alle
+  3 s, DC4 bleibt an).
+- **Light-Sleep eingebaut** (`lightSleepIfIdle()` am Ende von `loop()`): im
+  Standby, ohne BLE, ohne USB, ohne Aufnahme/Streaming bis zur nächsten
+  Sensorlesung bzw. zum Ende eines Vibrationspulses schlafen; Motor-Pin und
+  Display-CS werden gehalten. Nicht während das CNN rechnet: Light-Sleep hält
+  beide Kerne an, und das CNN braucht ≈ 0,34 s je Auswertung alle 0,5 s.
+  Erwartung deshalb nur ≈ 8 h → 10–11 h im Unterricht (ungemessen). Der
+  große Hebel wäre ein seltener rechnendes CNN.
+- Geflasht, am Kabel läuft alles normal. Erkennung mit Light-Sleep (ohne
+  Kabel, Standby) und Akku-Laufzeit werden ausprobiert.
