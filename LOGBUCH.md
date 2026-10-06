@@ -605,3 +605,41 @@ die Firmware; Anleitung im README dort).
   Erst-Kalibrierung zurück zu „Tippen zum Starten“. Hinweis auf dem
   Kalibrier-Bildschirm. Tastendruck selbst noch nicht auf der Uhr getestet.
 - App: 28 Unit-Tests grün, `flutter analyze` ohne Befunde. Firmware geflasht.
+
+## 06.10.2026 (Fortsetzung) – Sensor-Fehler behoben, CNN nachtrainiert, Akku-Anzeige, Ziel-Bildschirm
+
+- **Fehler: keine Erkennung mehr.** Kalibrierung zeigte N = H (Arm unten = Arm
+  hoch), `score` immer 0. Ursache: Energietest 4 hatte den QMI8658-Oszillator
+  abgeschaltet (CTRL1 Bit 0); `qmiInit()` löschte das Bit nicht, der Sensor
+  lieferte einen eingefrorenen Wert (Warnung stand seit Test 3 im Logbuch).
+  Jetzt: Bit 0 ausdrücklich löschen, Einstellung zurücklesen, bis zu 3
+  Versuche. Danach neu kalibriert (N/H ≈ 70° auseinander), Erkennung läuft.
+- **Neue serielle Befehle:** `SDDUMP` (ganze `/aufnahme.csv` übertragen),
+  `SDMODELAUS` (`/model.tflite` → `/model_alt.tflite`, damit das eingebaute
+  Modell geladen wird – nach einem Neutraining nötig, weil `CNN_MEAN/STD` nur
+  zum eingebauten Modell passen).
+- **CNN nachtrainiert** mit den SD-Aufnahmen vom 06.10. (`meldedaten/
+  uhr_aufnahme_2026-10-06.csv`, Trials 1002–1008; 1000/1001 waren schon in
+  `kombiniert.csv`) → `meldedaten/kombiniert_2026-10-06.csv`.
+  - Altes Modell auf den neuen Aufnahmen: Meldungen 66 % erkannt, 44 % der
+    „nicht melden“-Abschnitte fälschlich als Meldung.
+  - Zwischenmodell (mit 1002/1003) auf ungesehenen 1004–1008: 85 % erkannt,
+    0–17 % Fehlalarme. Finales Modell (alle Daten), CV mit gestückelten langen
+    Aufnahmen: 0,929 (90 % erkannt, 10 % Fehlalarme).
+  - Lage allein trennt „meldung“ und „kopf“ nicht (mittlere Richtung fast
+    gleich) – das muss das CNN aus der Bewegung lernen.
+  - Windows' Intelligente App-Steuerung blockierte zuerst TensorFlow (gab nach
+    einigen Versuchen frei) und dauerhaft `sklearn` → `trainieren_cnn.py` läuft
+    jetzt ohne scikit-learn (LogReg-Baseline entfällt, Konfusionsmatrix mit
+    numpy). `konvertiere_cnn_tflite.py` lässt die Zeilenenden der Firmware
+    unverändert (schrieb vorher unter Windows CRLF).
+- **Akku-Anzeige:** Kurve an diesen Akku angepasst (voll ohne Kabel unter Last
+  ≈ 4,11 V statt 4,20 V – vorher sah ein voller Akku nach 92 % aus); 8
+  Lesungen gemittelt, Display-Last ausgeglichen, ≈ 2 min geglättet; ohne Kabel
+  sinkt die Anzeige nur, mit Kabel steigt sie nur (≤ 99 %, 100 % erst bei
+  „Laden fertig“ des AXP2101). Unterhalb von voll noch geschätzt – genauer mit
+  einer gemessenen vollen Entladung.
+- **Meldeziel erreicht:** 2 s eigener Bildschirm „Ziel erreicht!“ (Fach x/y,
+  Doppelpuls; im Standby kurz Display an), danach ist das Ziel bis zur
+  nächsten Stunde vom Zifferblatt ausgeblendet.
+- Alles geflasht; Ziel-Bildschirm noch nicht in einer echten Stunde gesehen.

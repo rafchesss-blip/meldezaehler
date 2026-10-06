@@ -168,7 +168,7 @@ def update_core_scaler():
         return ', '.join(f'{float(v):.9g}f' for v in vals)
 
     pfad = 'UhrMeldezaehler/UhrMeldezaehler_core.h'
-    with open(pfad, 'r', encoding='utf-8') as f:
+    with open(pfad, 'r', encoding='utf-8', newline='') as f:   # Zeilenenden unverändert lassen
         text = f.read()
 
     text = re.sub(
@@ -180,7 +180,7 @@ def update_core_scaler():
         'static const float CNN_STD[6]  = {' + fmt6(std) + '};',
         text)
 
-    with open(pfad, 'w', encoding='utf-8') as f:
+    with open(pfad, 'w', encoding='utf-8', newline='') as f:
         f.write(text)
     print(f'CNN_MEAN/CNN_STD in {pfad} aktualisiert.')
 

@@ -164,13 +164,16 @@ static bool qmiReadData(int16_t &ax, int16_t &ay, int16_t &az,
   return true;
 }
 
-static bool qmiInit() {
+static bool qmiInitOnce() {
   // Soft-Reset (Register 0x60 = 0xB0)
   qmiWrite(0x60, 0xB0);
   delay(20);
 
-  // Adress-Auto-Increment aktivieren (CTRL1 Bit 6)
-  qmiWrite(0x02, qmiRead(0x02) | 0x40);
+  // CTRL1: Adress-Auto-Increment an (Bit 6), interner Oszillator an (Bit 0
+  // löschen). Die Energietests schalten den Oszillator mit Bit 0 ab, und der
+  // Soft-Reset setzt es nicht zurück – dann liefert der Sensor nur noch einen
+  // eingefrorenen Wert (gefunden 06.10.2026: Kalibrierung N = H, keine Erkennung).
+  qmiWrite(0x02, (qmiRead(0x02) | 0x40) & ~0x01);
   delay(5);
 
   if (qmiRead(0x00) != 0x05) return false;   // WHO_AM_I
@@ -189,7 +192,21 @@ static bool qmiInit() {
 
   // CTRL7 (0x08): Accel + Gyro aktivieren
   qmiWrite(0x08, 0x03);
-  return true;
+  delay(5);
+
+  // Einstellung zurücklesen (nach einem Energietest kam sie einmal nicht an)
+  bool ok = (qmiRead(0x02) & 0x41) == 0x40 && qmiRead(0x03) == 0x03 && qmiRead(0x04) == 0x63 &&
+            qmiRead(0x08) == 0x03;
+  if (!ok)
+    USBSerial.printf("QMI8658: Einstellung nicht uebernommen (CTRL1=%02X CTRL7=%02X)\n", qmiRead(0x02),
+                     qmiRead(0x08));
+  return ok;
+}
+
+static bool qmiInit() {
+  for (int i = 0; i < 3; i++)
+    if (qmiInitOnce()) return true;
+  return false;
 }
 
 // Skalen: Accel ±2g -> 2/32768 g/LSB, Gyro ±1024dps -> 1024/32768 dps/LSB
@@ -417,8 +434,8 @@ static const float REF_MELDUNG[3] = {-0.19802275f, 0.68946092f, 0.69672852f};
 #if USE_CNN
 // Per-Kanal-Standardisierung des CNN (aus modell_cnn_meta.joblib).
 // Kanäle: 0..2 = Beschleunigung (g), 3..5 = Drehrate (dps)
-static const float CNN_MEAN[6] = {-0.517373979f, 0.144679025f, 0.636336744f, 7.82536364f, 0.632597327f, 7.15408325f};
-static const float CNN_STD[6]  = {0.412273735f, 0.468833745f, 0.34916544f, 74.5159683f, 86.1606064f, 78.6526871f};
+static const float CNN_MEAN[6] = {-0.423390329f, -0.0561892018f, 0.631684422f, 5.10281849f, 3.52453232f, 6.11468363f};
+static const float CNN_STD[6]  = {0.447474003f, 0.557409108f, 0.396954149f, 83.5678329f, 132.824936f, 97.0514908f};
 
 // Tensor-Arena + Interpreter (int8-CNN, 1,5-s-Fenster x 6 Kanäle)
 static constexpr int CNN_ARENA_SIZE = 32 * 1024;
@@ -645,6 +662,11 @@ struct Period {
 static Period ttDays[MAX_DAYS][MAX_PERIODS];
 static uint8_t ttCount[MAX_DAYS];                 // Anzahl Stunden pro Tag
 static int16_t lessonCounts[MAX_DAYS][MAX_PERIODS];
+// Meldeziel: Stunde (Tag * MAX_PERIODS + Index), in der das Ziel erreicht
+// wurde – dort blendet das Zifferblatt das Ziel aus. Pending: Bildschirm
+// „Ziel erreicht“ zeigen (ui_ctl.h).
+static int goalReachedLesson = -1;
+static bool goalCelebratePending = false;
 static bool ttActive = false;
 
 // BLE GATT-Objekte (Zeit-Sync + Statistik)
@@ -708,14 +730,19 @@ static int weekdayOf(int d, int m, int y) {
 
 static int findPeriod(int day, int h, int m);  // Vorabdeklaration (Definition weiter unten)
 
-// Spannungsbasierte Akku-Prozent (LiPo-Entladekurve). Der AXP2101-Fuel-Gauge
-// ist ohne Kalibrierdaten unzuverlässig; die Batteriespannung ist robuster.
+// Spannungsbasierte Akku-Prozent. Der AXP2101-Fuel-Gauge ist ohne
+// Kalibrierdaten unzuverlässig; die Batteriespannung ist robuster.
+// Kurve an diesen Akku angepasst (Energietests Okt. 2026): voll und ohne Kabel
+// liegt er unter Last bei ≈ 4,11 V (nicht 4,20 V wie eine allgemeine
+// LiPo-Kurve annimmt – dort sah ein frisch geladener Akku nach 92 % aus).
+// Darunter eine übliche LiPo-Entladeform; genauer wird es erst mit einer
+// vollständig gemessenen Entladekurve.
 static int battPctFromVoltage(uint16_t mv) {
   if (mv <= 0) return -1;
-  if (mv >= 4200) return 100;
+  if (mv >= 4110) return 100;
   if (mv <= 3300) return 0;
-  static const uint16_t v[] = {4200, 4100, 3980, 3870, 3780, 3720, 3670, 3620, 3560, 3470, 3380, 3300};
-  static const int    p[] = {100,   92,   82,   72,   60,   50,   40,   30,   20,   12,    5,    0};
+  static const uint16_t v[] = {4110, 4050, 3980, 3920, 3860, 3810, 3770, 3730, 3690, 3610, 3500, 3300};
+  static const int    p[] = {100,   90,   80,   70,   60,   50,   40,   30,   20,   10,    5,    0};
   for (int i = 0; i < 11; i++) {
     if (mv <= v[i] && mv >= v[i + 1]) {
       float t = (float)(mv - v[i + 1]) / (v[i] - v[i + 1]);
@@ -723,6 +750,51 @@ static int battPctFromVoltage(uint16_t mv) {
     }
   }
   return 0;
+}
+
+// Akku-Anzeige (1x/s). Die Spannung allein springt: Display an kostet
+// ≈ 20 mV, beim Laden liegt sie deutlich über der Ruhespannung, und direkt
+// nach dem Abstecken fällt sie erst schnell. Deshalb:
+//  - 8 Lesungen mitteln, Display-Last ausgleichen, über ≈ 2 min glätten
+//  - ohne Kabel sinkt die Anzeige nur (keine Sprünge nach oben, wenn die
+//    Last wegfällt); mit Kabel steigt sie nur
+//  - beim Laden zählt die Spannung abzüglich ≈ 80 mV Ladeüberhöhung, höchstens
+//    99 %; 100 % erst, wenn der AXP2101 „Laden fertig“ meldet
+static void updateBattery() {
+  static float emaMv = -1;
+  static int shown = -1;
+  static bool lastVbus = false;
+
+  if (!pmu.isBatteryConnect()) {
+    battMV = 0;
+    battCharging = false;
+    cachedPct = -1;
+    emaMv = -1;
+    shown = -1;
+    return;
+  }
+  uint32_t sum = 0;
+  for (int i = 0; i < 8; i++) sum += pmu.getBattVoltage();
+  battMV = sum / 8;
+  battCharging = pmu.isCharging();
+  bool vbus = pmu.isVbusIn();
+
+  float mv = battMV;
+  if (!standby && halOk) mv += 10.0f + 15.0f * brightness / 255.0f;   // Display-Last ausgleichen
+  if (emaMv < 0 || vbus != lastVbus) emaMv = mv;   // Kabel an/ab: neu ansetzen
+  else emaMv += (mv - emaMv) / 120.0f;             // ≈ 2 min Zeitkonstante
+  lastVbus = vbus;
+
+  int pct;
+  if (vbus) {
+    if (pmu.getChargerStatus() == XPOWERS_AXP2101_CHG_DONE_STATE) pct = 100;
+    else pct = LV_MIN(battPctFromVoltage((uint16_t)(emaMv - 80.0f)), 99);
+    if (shown < 0 || pct > shown) shown = pct;     // beim Laden nur steigen
+  } else {
+    pct = battPctFromVoltage((uint16_t)emaMv);
+    if (shown < 0 || pct < shown) shown = pct;     // ohne Kabel nur sinken
+  }
+  cachedPct = shown;
 }
 
 // In jedem loop()-Durchlauf aufrufen. Die Uhrzeit wird alle 200 ms gelesen –
@@ -743,19 +815,7 @@ static void updateEnv() {
   }
   if (now - lastEnvMs < 1000) return;
   lastEnvMs = now;
-  // Akku: spannungsbasiert + gleitend gemittelt (keine Sprünge unter Last)
-  static int smoothPct = -1;
-  bool battOk = pmu.isBatteryConnect();
-  battMV = battOk ? pmu.getBattVoltage() : 0;
-  battCharging = battOk && pmu.isCharging();
-  int pct = battPctFromVoltage(battMV);
-  if (pct >= 0) {
-    if (smoothPct < 0) smoothPct = pct;
-    else smoothPct = (smoothPct * 3 + pct) / 4;
-    cachedPct = smoothPct;
-  } else {
-    cachedPct = -1;
-  }
+  updateBattery();
 
   // Akku-Warnung: einmalig vibrieren, wenn unter 20 %
   if (cachedPct >= 0 && cachedPct < 20 && !battWarned) {
@@ -797,6 +857,7 @@ static void updateEnv() {
     }
     lastLessonDay = curWd;
     lastLessonIdx = curP;
+    goalReachedLesson = -1;   // neue Stunde: Meldeziel wieder anzeigen
   }
 
   if (pCharStats) pCharStats->setValue(buildStatsJson().c_str());
@@ -945,6 +1006,13 @@ static void registerMeldung(unsigned long dauerMs = 0) {
       lessonCounts[wd][p]++;
       saveLessonStats();
       USBSerial.printf("[stunde] Tag %d Stunde %d: %d Meldungen\n", wd, p, lessonCounts[wd][p]);
+      // Meldeziel genau jetzt erreicht (sessionCount = Meldungen dieser Stunde)
+      int goal = ttDays[wd][p].goal;
+      if (goal > 0 && sessionCount == goal && goalReachedLesson != wd * MAX_PERIODS + p) {
+        goalReachedLesson = wd * MAX_PERIODS + p;
+        goalCelebratePending = true;
+        USBSerial.printf("[ziel] %s: Ziel %d erreicht\n", ttDays[wd][p].name, goal);
+      }
     }
   }
 
@@ -2229,8 +2297,39 @@ static void handleSerial() {
               f.close();
             }
           }
+        } else if (line == "SDMODELAUS") {
+          // /model.tflite auf der SD-Karte beiseitelegen (nicht löschen), damit
+          // beim nächsten Start das eingebaute Modell geladen wird. Wichtig nach
+          // einem Neutraining: CNN_MEAN/CNN_STD passen nur zum eingebauten Modell.
+          if (!ensureSd()) USBSerial.println("SD nicht bereit");
+          else if (!SD_MMC.exists("/model.tflite")) USBSerial.println("kein /model.tflite auf der SD-Karte");
+          else {
+            SD_MMC.remove("/model_alt.tflite");
+            bool ok = SD_MMC.rename("/model.tflite", "/model_alt.tflite");
+            USBSerial.println(ok ? "/model.tflite -> /model_alt.tflite (Neustart laedt eingebautes Modell)"
+                                 : "Umbenennen fehlgeschlagen");
+          }
+        } else if (line == "SDDUMP") {
+          // Ganze /aufnahme.csv übertragen (zum Trainieren am PC):
+          // "#SDDUMP <Bytes>", dann der Dateiinhalt, dann "#SDDUMP ENDE"
+          File f = ensureSd() ? SD_MMC.open("/aufnahme.csv", FILE_READ) : File();
+          if (!f) {
+            USBSerial.println("#SDDUMP FEHLER");
+          } else {
+            USBSerial.printf("#SDDUMP %u\n", (unsigned)f.size());
+            uint8_t buf[256];
+            while (f.available()) {
+              int n = f.read(buf, sizeof(buf));
+              if (n <= 0) break;
+              // TX-Timeout ist 0 (setup) -> selbst warten, sonst gehen Bytes verloren
+              while (USBSerial.availableForWrite() < n) delay(1);
+              USBSerial.write(buf, n);
+            }
+            f.close();
+            USBSerial.println("\n#SDDUMP ENDE");
+          }
         } else {
-          USBSerial.println("Unbekannt. Befehle: RESET, CAL, CALIB, STATS, BATT, BTN, SLEEP, VIB, TT, TTCMD <P|...>, MELDUNG, SENSOR, STREAM, STOPSTREAM, RECSD, STOPSD, SDCHECK, AKKU, AKKULOG, AKKUSTART, AKKUSTOP, AKKUCLEAR, TIME HH:MM:SS, DATE DD.MM.YY");
+          USBSerial.println("Unbekannt. Befehle: RESET, CAL, CALIB, STATS, BATT, BTN, SLEEP, VIB, TT, TTCMD <P|...>, MELDUNG, SDDUMP, SDMODELAUS, SENSOR, STREAM, STOPSTREAM, RECSD, STOPSD, SDCHECK, AKKU, AKKULOG, AKKUSTART, AKKUSTOP, AKKUCLEAR, TIME HH:MM:SS, DATE DD.MM.YY");
         }
       }
       line = "";

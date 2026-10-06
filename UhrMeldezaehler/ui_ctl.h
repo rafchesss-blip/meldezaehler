@@ -151,6 +151,28 @@ static void ctlProcessPending() {
     delay(800);
     ESP.restart();
   }
+  if (goalCelebratePending) {
+    goalCelebratePending = false;
+    if (halOk && goalReachedLesson >= 0) {
+      // Die Melde-Vibration erst zu Ende laufen lassen: während der Anzeige
+      // läuft loop() nicht und könnte den Motor nicht abschalten
+      while (vibPhaseOn || vibPulsesLeft > 0) {
+        updateVibration();
+        delay(5);
+      }
+      const Period &pr = ttDays[goalReachedLesson / MAX_PERIODS][goalReachedLesson % MAX_PERIODS];
+      bool wasStandby = standby;
+      if (wasStandby) wakeFromStandby();   // auch bei ausgeschaltetem Display kurz zeigen
+      char sub[48];
+      snprintf(sub, sizeof(sub), "%s  %d/%d", pr.name, sessionCount, pr.goal);
+      uiMessage(LV_SYMBOL_OK, lv_color_hex(0x30D158), "Ziel erreicht!", sub);
+      vibrateBlocking(150);                // Doppelpuls zur Bestätigung
+      delay(120);
+      vibrateBlocking(150);
+      delay(2000 - 420);                   // zusammen ≈ 2 s
+      if (wasStandby) enterStandby();
+    }
+  }
   if (ctlPendingCalib >= 0) {
     int part = ctlPendingCalib;
     ctlPendingCalib = -1;

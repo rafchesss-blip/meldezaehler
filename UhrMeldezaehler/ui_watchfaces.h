@@ -299,6 +299,7 @@ static void wfBuild(lv_obj_t *s, int idx) {
 static void wfUpdateGoal() {
   UiLesson l = uiLessonInfo();
   int goal = (l.wd >= 0 && l.cur >= 0) ? ttDays[l.wd][l.cur].goal : 0;
+  if (goal > 0 && goalReachedLesson == l.wd * MAX_PERIODS + l.cur) goal = 0;   // erreicht: ausblenden
   uiSetHidden(wf.goal, goal <= 0);
   uiSetHidden(wf.goalBar, goal <= 0);
   if (goal <= 0) return;

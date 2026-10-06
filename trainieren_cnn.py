@@ -25,10 +25,23 @@ os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
-from sklearn.linear_model import LogisticRegression
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
-from sklearn.metrics import confusion_matrix
+# scikit-learn nur für die LogReg-Vergleichsbaseline. Fehlt es (oder blockiert
+# Windows' App-Steuerung seine DLLs), läuft das CNN-Training trotzdem.
+try:
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.pipeline import make_pipeline
+    from sklearn.preprocessing import StandardScaler
+    HAVE_SKLEARN = True
+except ImportError as e:
+    HAVE_SKLEARN = False
+    print(f'Hinweis: scikit-learn nicht nutzbar ({e}) – LogReg-Baseline entfällt.')
+
+
+def confusion_matrix(y_true, y_pred, labels):
+    cm = np.zeros((len(labels), len(labels)), dtype=int)
+    for t, p in zip(y_true, y_pred):
+        cm[labels.index(t), labels.index(p)] += 1
+    return cm
 
 warnings.filterwarnings('ignore')
 
@@ -193,7 +206,7 @@ def main():
         cm_sum_cnn += confusion_matrix(y_idx[te], p_cnn, labels=list(range(n_k)))
 
         # --- LogisticRegression (Baseline, gleiche Fenster) ---
-        if len(set(y_idx[tr])) >= 2:
+        if HAVE_SKLEARN and len(set(y_idx[tr])) >= 2:
             Ftr = np.array([merkmale_lr(s) for s in X[tr]])
             Fte = np.array([merkmale_lr(s) for s in X[te]])
             lr = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
@@ -203,7 +216,8 @@ def main():
             cm_sum_lr += confusion_matrix(y_idx[te], p_lr, labels=list(range(n_k)))
         else:
             lr_acc.append(np.nan)
-            print(f'  Fold {fi}: LogReg übersprungen (nur 1 Klasse im Train-Fold)')
+            if HAVE_SKLEARN:
+                print(f'  Fold {fi}: LogReg übersprungen (nur 1 Klasse im Train-Fold)')
 
         print(f'Fold {fi}: CNN={acc:.3f}   LogReg={lr_acc[-1]:.3f}')
 
