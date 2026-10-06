@@ -638,6 +638,7 @@ static int lastLessonIdx = -1;
 struct Period {
   char name[12];
   uint8_t sh, sm, eh, em;   // Start/Ende (Stunde, Minute)
+  uint8_t goal;             // Meldeziel für diese Stunde (0 = keins)
   bool active;
 };
 
@@ -816,11 +817,12 @@ static void splitCmd(const String &s, String out[], int maxOut, int &n) {
   }
 }
 
-static void setPeriod(int day, int idx, const String &name, int sh, int sm, int eh, int em) {
+static void setPeriod(int day, int idx, const String &name, int sh, int sm, int eh, int em, int goal) {
   if (day < 0 || day >= MAX_DAYS || idx < 0 || idx >= MAX_PERIODS) return;
   ttDays[day][idx].active = true;
   ttDays[day][idx].sh = sh; ttDays[day][idx].sm = sm;
   ttDays[day][idx].eh = eh; ttDays[day][idx].em = em;
+  ttDays[day][idx].goal = (uint8_t)constrain(goal, 0, 99);
   strncpy(ttDays[day][idx].name, name.c_str(), 11);
   ttDays[day][idx].name[11] = 0;
   if (idx + 1 > ttCount[day]) ttCount[day] = idx + 1;
@@ -834,7 +836,8 @@ static void saveTimetable() {
         if (s.length()) s += "\n";
         s += String(d) + "|" + String(p) + "|" + String(ttDays[d][p].name) + "|" +
              String(ttDays[d][p].sh) + "|" + String(ttDays[d][p].sm) + "|" +
-             String(ttDays[d][p].eh) + "|" + String(ttDays[d][p].em);
+             String(ttDays[d][p].eh) + "|" + String(ttDays[d][p].em) + "|" +
+             String(ttDays[d][p].goal);
       }
   prefs.putString("tt", s);
   prefs.putInt("ttactive", ttActive ? 1 : 0);
@@ -851,8 +854,9 @@ static void loadTimetable() {
     String t[8];
     int n = 0;
     splitCmd(line, t, 8, n);
-    if (n >= 7)
-      setPeriod(t[0].toInt(), t[1].toInt(), t[2], t[3].toInt(), t[4].toInt(), t[5].toInt(), t[6].toInt());
+    if (n >= 7)   // ältere Einträge ohne Meldeziel: Ziel 0
+      setPeriod(t[0].toInt(), t[1].toInt(), t[2], t[3].toInt(), t[4].toInt(), t[5].toInt(), t[6].toInt(),
+                n >= 8 ? t[7].toInt() : 0);
     if (nl < 0) break;
     start = nl + 1;
   }
@@ -1016,6 +1020,7 @@ static void clearTimetable() {
     for (int p = 0; p < MAX_PERIODS; p++) {
       ttDays[d][p].active = false;
       ttDays[d][p].name[0] = 0;
+      ttDays[d][p].goal = 0;
       lessonCounts[d][p] = 0;
     }
   }
@@ -1034,18 +1039,20 @@ static void handleTTCommand(const String &cmd) {
     saveTimetable();
     USBSerial.println("Stundenplan aktiviert & gespeichert.");
   } else if (cmd.startsWith("P|")) {
-    String t[8];
+    // P|Tag|Index|Name|sh|sm|eh|em[|Meldeziel]
+    String t[9];
     int n = 0;
-    splitCmd(cmd, t, 8, n);
+    splitCmd(cmd, t, 9, n);
     if (n >= 8 && t[0] == "P") {
       int day = t[1].toInt();
       int idx = t[2].toInt();
       int sh = t[4].toInt(), sm = t[5].toInt();
       int eh = t[6].toInt(), em = t[7].toInt();
+      int goal = n >= 9 ? t[8].toInt() : 0;
       if (day >= 0 && day < MAX_DAYS && idx >= 0 && idx < MAX_PERIODS) {
-        setPeriod(day, idx, t[3], sh, sm, eh, em);
-        USBSerial.printf("[stunde] Tag %d Idx %d = %s %02d:%02d-%02d:%02d\n",
-                         day, idx, ttDays[day][idx].name, sh, sm, eh, em);
+        setPeriod(day, idx, t[3], sh, sm, eh, em, goal);
+        USBSerial.printf("[stunde] Tag %d Idx %d = %s %02d:%02d-%02d:%02d Ziel %d\n",
+                         day, idx, ttDays[day][idx].name, sh, sm, eh, em, goal);
       }
     }
   }
@@ -1472,12 +1479,40 @@ static void uiMessage(const char *icon, lv_color_t c, const char *title, const c
 static void uiInvalidateAll();
 static void powerBack();
 
+// Abbruch per Power-Taste: Einmal drücken beendet die laufende Kalibrierung.
+// Die bis dahin gemessenen Werte werden verworfen, die bisherige Kalibrierung
+// bleibt unverändert. Geprüft wird nur, solange eine Kalibrierung läuft.
+static bool calibRunning = false;
+static bool calibAborted = false;
+
+static bool calibAbortCheck() {
+  if (!calibRunning || calibAborted) return calibAborted;
+  pmu.getIrqStatus();
+  if (pmu.isPekeyShortPressIrq()) {
+    pmu.clearIrqStatus();
+    calibAborted = true;
+    USBSerial.println("[calib] Abbruch per Power-Taste");
+  }
+  return calibAborted;
+}
+
+// delay() mit Abbruchprüfung alle 50 ms; true = abgebrochen
+static bool calibWait(unsigned long ms) {
+  unsigned long t0 = millis();
+  while (millis() - t0 < ms) {
+    if (calibAbortCheck()) return true;
+    delay(50);
+  }
+  return calibAbortCheck();
+}
+
 // Eine ruhige Haltung messen -> mittlere "oben"-Richtung (Einheitsvektor)
 static Vec3 collectStaticRep(unsigned long dauerMs) {
   float sx = 0, sy = 0, sz = 0;
   int n = 0;
   unsigned long t0 = millis();
   while (millis() - t0 < dauerMs) {
+    if ((n & 7) == 0 && calibAbortCheck()) break;   // etwa alle 70 ms
     int16_t ax, ay, az, gx, gy, gz;
     if (qmiReadData(ax, ay, az, gx, gy, gz)) {
       sx += ax * ACCEL_SCALE;
@@ -1497,6 +1532,7 @@ static float collectNormalRep(unsigned long dauerMs) {
   int n = 0;
   unsigned long t0 = millis();
   while (millis() - t0 < dauerMs && n < 200) {
+    if ((n & 7) == 0 && calibAbortCheck()) break;
     int16_t a, b, c, gx, gy, gz;
     if (qmiReadData(a, b, c, gx, gy, gz)) {
       ax[n] = a * ACCEL_SCALE;
@@ -1533,13 +1569,15 @@ template <typename F>
 static void calibSteps(const char *title, const char *sub, F measure) {
   for (int i = 3; i >= 1; i--) {
     uiCalibShow(title, sub, i, 0, 0);
-    delay(1000);
+    if (calibWait(1000)) return;
   }
   for (int i = 1; i <= CAL_REPS; i++) {
+    if (calibAbortCheck()) return;
     uiCalibShow(title, sub, 0, i, CAL_REPS);
     vibrateBlocking(VIB_REP_MS);
     measure();
   }
+  if (calibAbortCheck()) return;
   vibrateBlocking(VIB_SCHRITT_MS);
 }
 
@@ -1620,24 +1658,49 @@ static void finishCalibration(bool resetSeit, float maxScore) {
 
 // what: 0 = alles, 1 = nur Arm UNTEN, 2 = nur Arm HOCH,
 //       3 = nur NICHT MELDEN, 4 = nur TISCH
-static void runCalibrationPart(int what) {
+// Die Messwerte werden erst übernommen, wenn alle Schritte durchgelaufen sind.
+// Rückgabe false = per Power-Taste abgebrochen, bisherige Kalibrierung gilt weiter.
+static bool runCalibrationPart(int what) {
+  calibAborted = false;
+  calibRunning = true;
+  pmu.clearIrqStatus();   // ein alter Tastendruck soll nicht sofort abbrechen
+
   if (what == 4) {
-    T_dir = collectTisch();
-    tischCalibrated = true;
-    finishCalibration(true, -10.0f);
-    return;
+    Vec3 t = collectTisch();
+    if (!calibAborted) {
+      T_dir = t;
+      tischCalibrated = true;
+      finishCalibration(true, -10.0f);
+    }
+  } else {
+    Vec3 n = N_dir, h = H_dir;
+    float maxScore = -10.0f;
+    if (what == 0 || what == 1) n = collectArmUnten();
+    if (!calibAborted && (what == 0 || what == 2)) h = collectArmHoch();
+    if (!calibAborted && (what == 0 || what == 3)) maxScore = collectNichtMelden();
+    if (!calibAborted) {
+      N_dir = n;
+      H_dir = h;
+      bool resetSeit = (what == 0 || what == 1 || what == 2);
+      finishCalibration(resetSeit, maxScore);
+    }
   }
 
-  float maxScore = -10.0f;
-  if (what == 0 || what == 1) N_dir = collectArmUnten();
-  if (what == 0 || what == 2) H_dir = collectArmHoch();
-  if (what == 0 || what == 3) maxScore = collectNichtMelden();
-  bool resetSeit = (what == 0 || what == 1 || what == 2);
-  finishCalibration(resetSeit, maxScore);
+  calibRunning = false;
+  if (!calibAborted) return true;
+  motorWrite(false);
+  bufHead = 0;
+  bufCount = 0;
+  USBSerial.println("Kalibrierung abgebrochen - Messwerte verworfen.");
+  uiMessage(LV_SYMBOL_CLOSE, lv_color_hex(0xFF453A), "Abgebrochen",
+            calibrated ? "Messwerte verworfen – die bisherige Kalibrierung gilt weiter."
+                       : "Messwerte verworfen.");
+  delay(1500);
+  return false;
 }
 
-static void runCalibration() {
-  runCalibrationPart(0);
+static bool runCalibration() {
+  return runCalibrationPart(0);
 }
 
 // Gespeicherte Kalibrierung löschen -> beim nächsten Start beginnt die
@@ -2072,11 +2135,17 @@ static void handleSerial() {
         } else if (line == "TT") {
           for (int d = 0; d < MAX_DAYS; d++) {
             for (int p = 0; p < ttCount[d]; p++) {
-              USBSerial.printf("Tag %d [%d] %s %02d:%02d-%02d:%02d = %d\n",
+              USBSerial.printf("Tag %d [%d] %s %02d:%02d-%02d:%02d = %d (Ziel %d)\n",
                                d, p, ttDays[d][p].name, ttDays[d][p].sh, ttDays[d][p].sm,
-                               ttDays[d][p].eh, ttDays[d][p].em, lessonCounts[d][p]);
+                               ttDays[d][p].eh, ttDays[d][p].em, lessonCounts[d][p], ttDays[d][p].goal);
             }
           }
+        } else if (line.startsWith("TTCMD ")) {
+          // Stundenplan-Befehl wie per BLE (CLEAR, P|..., SAVE) – zum Testen ohne App
+          handleTTCommand(line.substring(6));
+        } else if (line == "MELDUNG") {
+          registerMeldung();
+          USBSerial.printf("Meldung gezaehlt. Heute %d, diese Stunde %d\n", totalHeute, sessionCount);
         } else if (line == "VIB") {
           USBSerial.println("Vibrationstest ...");
           vibrate(300);
@@ -2161,7 +2230,7 @@ static void handleSerial() {
             }
           }
         } else {
-          USBSerial.println("Unbekannt. Befehle: RESET, CAL, CALIB, STATS, BATT, BTN, SLEEP, VIB, SENSOR, STREAM, STOPSTREAM, RECSD, STOPSD, SDCHECK, AKKU, AKKULOG, AKKUSTART, AKKUSTOP, AKKUCLEAR, TIME HH:MM:SS, DATE DD.MM.YY");
+          USBSerial.println("Unbekannt. Befehle: RESET, CAL, CALIB, STATS, BATT, BTN, SLEEP, VIB, TT, TTCMD <P|...>, MELDUNG, SENSOR, STREAM, STOPSTREAM, RECSD, STOPSD, SDCHECK, AKKU, AKKULOG, AKKUSTART, AKKUSTOP, AKKUCLEAR, TIME HH:MM:SS, DATE DD.MM.YY");
         }
       }
       line = "";

@@ -118,10 +118,12 @@ void setup() {
     USBSerial.printf("Kalibrierung aus NVS geladen. enterHoch=%.3f\n", enterHoch);
   } else {
     // Erst-Kalibrierung: erst tragen lassen, dann auf Tipp warten
-    if (halOk) uiFirstBoot();
-    USBSerial.println("Warte auf Tipp zum Kalibrieren (oder Befehl CAL) ...");
-    waitForTap();
-    runCalibration();
+    // (nach einem Abbruch per Power-Taste wieder von vorn)
+    do {
+      if (halOk) uiFirstBoot();
+      USBSerial.println("Warte auf Tipp zum Kalibrieren (oder Befehl CAL) ...");
+      waitForTap();
+    } while (!runCalibration());
   }
 
   // Tageszähler laden + ggf. Tageswechsel

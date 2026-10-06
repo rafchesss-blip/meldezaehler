@@ -154,9 +154,10 @@ static void ctlProcessPending() {
   if (ctlPendingCalib >= 0) {
     int part = ctlPendingCalib;
     ctlPendingCalib = -1;
-    runCalibrationPart(part);
-    uiMessage(LV_SYMBOL_OK, lv_color_hex(0x30D158), "Gespeichert", "Kalibrierung abgeschlossen.");
-    delay(1500);
+    if (runCalibrationPart(part)) {   // false = per Power-Taste abgebrochen
+      uiMessage(LV_SYMBOL_OK, lv_color_hex(0x30D158), "Gespeichert", "Kalibrierung abgeschlossen.");
+      delay(1500);
+    }
     screen = 1;
     view = 2;
   }

@@ -62,6 +62,7 @@ struct WfRefs {
   lv_obj_t *battBar;
   lv_obj_t *nowHead, *nowName, *nowTime, *nextHead, *nextName, *noPlan;
   lv_obj_t *hHand, *mHand, *sHand;
+  lv_obj_t *goal, *goalBar;   // Meldeziel der laufenden Stunde (alle Zifferblätter)
 };
 static WfRefs wf;
 static lv_point_precise_t wfPtsH[2], wfPtsM[2], wfPtsS[2];
@@ -264,6 +265,22 @@ static void wfBuildSchool(lv_obj_t *s) {
   wfBattRow(s, UI_PAD_WF + 4, 420);
 }
 
+// Meldeziel: Zeile + Balken am unteren Rand, auf allen Zifferblättern gleich.
+// Unterhalb y=460 ist auf jedem Zifferblatt frei; nur sichtbar, solange eine
+// Stunde mit Meldeziel läuft.
+static void wfBuildGoal(lv_obj_t *s) {
+  wf.goal = wfCenter(s, &font_m20, C_TEXT2, 458);
+  wf.goalBar = lv_bar_create(s);
+  lv_obj_set_size(wf.goalBar, 170, 8);
+  lv_obj_set_pos(wf.goalBar, (UI_W - 170) / 2, 486);
+  lv_obj_remove_flag(wf.goalBar, LV_OBJ_FLAG_CLICKABLE);
+  lv_obj_set_style_bg_color(wf.goalBar, C_SURFACE2, LV_PART_MAIN);
+  lv_obj_set_style_radius(wf.goalBar, 4, LV_PART_MAIN);
+  lv_obj_set_style_radius(wf.goalBar, 4, LV_PART_INDICATOR);
+  uiSetHidden(wf.goal, true);
+  uiSetHidden(wf.goalBar, true);
+}
+
 static void wfBuild(lv_obj_t *s, int idx) {
   memset(&wf, 0, sizeof(wf));
   switch (idx) {
@@ -274,6 +291,24 @@ static void wfBuild(lv_obj_t *s, int idx) {
     case 5: wfBuildSchool(s); break;
     default: wfBuildMinimal(s); break;
   }
+  wfBuildGoal(s);
+}
+
+// Fortschritt zum Meldeziel der laufenden Stunde (sessionCount zählt die
+// Meldungen seit Stundenbeginn)
+static void wfUpdateGoal() {
+  UiLesson l = uiLessonInfo();
+  int goal = (l.wd >= 0 && l.cur >= 0) ? ttDays[l.wd][l.cur].goal : 0;
+  uiSetHidden(wf.goal, goal <= 0);
+  uiSetHidden(wf.goalBar, goal <= 0);
+  if (goal <= 0) return;
+  bool done = sessionCount >= goal;
+  if (done) uiSetTextFmt(wf.goal, LV_SYMBOL_OK "  %s  %d/%d", ttDays[l.wd][l.cur].name, sessionCount, goal);
+  else uiSetTextFmt(wf.goal, "Ziel %s  %d/%d", ttDays[l.wd][l.cur].name, sessionCount, goal);
+  uiSetColor(wf.goal, done ? C_GREEN : C_TEXT2);
+  lv_bar_set_range(wf.goalBar, 0, goal);
+  lv_bar_set_value(wf.goalBar, LV_MIN(sessionCount, goal), LV_ANIM_OFF);
+  uiSetBg(wf.goalBar, done ? C_GREEN : C_AMBER, LV_PART_INDICATOR);
 }
 
 static void wfSetHand(lv_obj_t *line, lv_point_precise_t *pts, float deg, int tail, int len) {
@@ -319,6 +354,7 @@ static void wfUpdate(int idx) {
     lv_bar_set_value(wf.battBar, pct < 0 ? 0 : pct, LV_ANIM_OFF);
     uiSetBg(wf.battBar, uiBattColor(pct < 0 ? 0 : pct), LV_PART_INDICATOR);
   }
+  if (wf.goal) wfUpdateGoal();
 
   switch (idx) {
     case 0: {

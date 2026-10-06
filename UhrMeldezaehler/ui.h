@@ -261,8 +261,10 @@ static void uiCalibBuild() {
   lv_obj_align(uc.bar, LV_ALIGN_TOP_MID, 0, 300);
   lv_obj_set_style_bg_color(uc.bar, C_SURFACE2, LV_PART_MAIN);
   lv_obj_set_style_bg_color(uc.bar, C_GREEN, LV_PART_INDICATOR);
-  lv_obj_t *n = wfCenter(s, &font_m16, C_TEXT3, 420);
+  lv_obj_t *n = wfCenter(s, &font_m16, C_TEXT3, 410);
   lv_label_set_text(n, "Bei jeder Vibration: Position halten");
+  lv_obj_t *a = wfCenter(s, &font_m16, C_TEXT3, 436);
+  lv_label_set_text(a, "Power-Taste = Abbrechen");
   uc.active = true;
 }
 

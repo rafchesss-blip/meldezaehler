@@ -573,3 +573,35 @@ die Firmware; Anleitung im README dort).
   große Hebel wäre ein seltener rechnendes CNN.
 - Geflasht, am Kabel läuft alles normal. Erkennung mit Light-Sleep (ohne
   Kabel, Standby) und Akku-Laufzeit werden ausprobiert.
+
+## 06.10.2026 – App: Zeitraster, Fächer, Meldeziele; Uhr: Ziel-Anzeige, Kalibrier-Abbruch
+
+- **Flutter auf dem PC eingerichtet** (ohne Admin, `C:\Users\rafch\sdk\`):
+  Flutter 3.47.6, JDK 17 (Temurin), Android SDK 36; `JAVA_HOME`,
+  `ANDROID_HOME`, `PATH` für den Benutzer gesetzt. APKs lassen sich bauen.
+  Web-Plattform (`MeldeApp/web/`) ergänzt, damit die App zum Prüfen in Edge
+  läuft (`flutter run -d edge`; Bluetooth geht dort nicht).
+- **Zeitraster** (`slots_page.dart`): einmal festlegen, wann die 1., 2., …
+  Stunde ist; Vorschlag für die nächste Stunde mit gleicher Länge und Pause.
+  Die Tagesansicht zeigt alle Rasterstunden, Fach per Tipp eintragen.
+  Rasteränderungen ziehen die Zeiten aller Tage nach; alte Einträge mit
+  passenden Zeiten werden zugeordnet. „+“ bleibt für Stunden außerhalb.
+- **Fach-Vorschläge und Fachfarben** (`subject_colors.dart`): bisherige Fächer
+  als Chips unter dem Eingabefeld (ein Tipp genügt), feste Farbe je Fach
+  (14 Farben, beim ersten Eintragen vergeben und gespeichert; Groß-/
+  Kleinschreibung egal), Zeilen in der Tagesansicht eingefärbt.
+- **Fächer & Meldeziele** (`subjects_page.dart`): Fach umbenennen (alle Tage,
+  ggf. zusammenlegen), Farbe ändern, löschen, **Meldeziel pro Stunde**. Das
+  Ziel geht als 9. Teil im BLE-Befehl an die Uhr
+  (`P|Tag|Index|Name|sh|sm|eh|em|Ziel`); ältere Befehle ohne Ziel gehen weiter.
+- **Uhr: Ziel-Anzeige auf allen sechs Zifferblättern** (unten, y ≥ 458):
+  „Ziel Fach x/y“ mit Balken (orange), erreicht grün mit Häkchen; nur während
+  einer Stunde mit Ziel, gezählt mit dem Stundenzähler (`sessionCount`).
+  Ziel wird im Stundenplan (NVS) mitgespeichert. Testbefehle seriell:
+  `TTCMD <BLE-Befehl>`, `MELDUNG`. Auf der Uhr noch nicht angesehen (Ferien).
+- **Uhr: Kalibrierung per Power-Taste abbrechen:** einmal drücken beendet sie
+  sofort (Countdown und Messung); die Messwerte werden verworfen, die
+  bisherige Kalibrierung bleibt (Werte erst am Ende übernommen). Bei der
+  Erst-Kalibrierung zurück zu „Tippen zum Starten“. Hinweis auf dem
+  Kalibrier-Bildschirm. Tastendruck selbst noch nicht auf der Uhr getestet.
+- App: 28 Unit-Tests grün, `flutter analyze` ohne Befunde. Firmware geflasht.
