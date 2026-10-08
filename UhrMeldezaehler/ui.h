@@ -9,10 +9,13 @@
 #include "ui_theme.h"
 #include "ui_watchfaces.h"
 #include "ui_screens.h"
+#include "ui_spiel.h"
+#include "ui_ausloeser.h"
 
 enum {
   UI_WF = 0, UI_MELDE = 1, UI_SETTINGS = 2, UI_PICKER = 3, UI_APPS = 4,
-  UI_EDIT = 6, UI_ZEIT = 7, UI_TEST = 8, UI_REC = 9, UI_ALARM = 10, UI_AKKU = 11, UI_COUNT = 12
+  UI_EDIT = 6, UI_ZEIT = 7, UI_TEST = 8, UI_REC = 9, UI_ALARM = 10, UI_AKKU = 11, UI_SPIEL = SCREEN_SPIEL,
+  UI_AUSLOESER = SCREEN_AUSLOESER, UI_COUNT = 14
 };
 
 // Dauer der Übergangsanimation (0 = sofort). Während einer Schiebe-Animation
@@ -114,6 +117,8 @@ static lv_obj_t *uiGetScreen(int k) {
     case UI_REC: s = uiBuildRec(); break;
     case UI_ALARM: s = uiBuildAlarm(); break;
     case UI_AKKU: s = uiBuildAkku(); break;
+    case UI_SPIEL: s = uiBuildSpiel(); break;
+    case UI_AUSLOESER: s = uiBuildAusloeser(); break;
   }
   uiScr[k] = s;
   return s;
@@ -131,6 +136,8 @@ static void uiRefreshShown() {
     case UI_TEST: uiRefreshTest(); break;
     case UI_REC: uiRefreshRec(); break;
     case UI_AKKU: uiRefreshAkku(); break;
+    case UI_SPIEL: uiRefreshSpiel(); break;
+    case UI_AUSLOESER: uiRefreshAusloeser(); break;
   }
   // Akku-Warnleiste über allen Masken
   bool low = cachedPct >= 0 && cachedPct < 20;

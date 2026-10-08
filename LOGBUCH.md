@@ -643,3 +643,42 @@ die Firmware; Anleitung im README dort).
   Doppelpuls; im Standby kurz Display an), danach ist das Ziel bis zur
   nächsten Stunde vom Zifferblatt ausgeblendet.
 - Alles geflasht; Ziel-Bildschirm noch nicht in einer echten Stunde gesehen.
+
+## 07./08.10.2026 – BOOT-Shortcuts, Drangenommen/Falsch per Bewegung, Labyrinth, Bluetooth-Auslöser
+
+- **BOOT-Shortcuts (ohne Bildschirm):** BOOT 1 s halten → kurze Vibration;
+  danach innerhalb von 3 s 2× kurz drücken = letzte Meldung löschen (2×
+  Vibration) oder nochmal 1 s halten = Meldung hinzufügen. Diese Vibrationen
+  kommen auch bei Stummschaltung (`vibrate(..., force)`), nur nicht bei Motor aus.
+- **Wake-on-Motion-Light-Sleep ausprobiert und wieder entfernt** – zurück zum
+  alten Light Sleep im Standby.
+- **Drangenommen / richtig / falsch ohne Ablenkung:**
+  - Arm **schnell** senken nach einer Meldung = drangenommen und richtig
+    (automatisch), langsam senken = nicht drangenommen. Gemessen wird die
+    höchste Drehrate zwischen „zuletzt oben“ und „Arm unten“.
+  - **Aufs Knie klopfen** = falsch (richtig − 1, falsch + 1), nur zwischen
+    einer drangenommenen Meldung und der nächsten Meldung, Sperre 1,5 s.
+    Erkennung: Ruck ≥ Grenze und Stoß ≥ 1,6 g im 300-ms-Fenster.
+  - Vibration: normale Meldung 1×, drangenommen 2×, falsch 3×.
+  - Grenzen aus eigenen Aufnahmen (`meldedaten/uhr_aufnahme_2026-10-07.csv`,
+    Trials 1009 senken_langsam, 1010 senken_schnell, 1011 klopfen):
+    `SENK 500` (°/s), `KLOPF 1.0 1.6`; seriell einstellbar, in NVS gespeichert.
+  - Aufnahme-App hat neue Klassen `senken_langsam`, `senken_schnell`,
+    `klopfen` und eine Übungsanzeige (letzte Senk-Drehrate, letzter Stoß).
+    `trainieren_cnn.py` filtert auf die CNN-Klassen.
+- **Fehler „Hand ist dauernd oben“ behoben:** zusätzlich muss die Lage nah an
+  der Hoch-Richtung sein (rein bei cos > 0,50, raus bei < 0,40); im
+  Labyrinth-Spiel ist die Meldeerkennung aus.
+- **Apps:** Kacheln größer, Icon überlappt den Text nicht mehr.
+  - **Labyrinth:** Kugel per Neigung durch zufällig erzeugtes Labyrinth
+    (6×6 bis 12×12), Vibration an Wänden, Antippen = nächstes Level.
+  - **Bluetooth-Auslöser:** Uhr meldet sich zusätzlich als HID-Tastatur
+    (Consumer Control); großer weißer Knopf sendet „Lauter“ = Kamera-Auslöser
+    am Handy. Mit Bonding, Werbung startet nach Trennen neu.
+- **Neustart-Schleife mit Bluetooth behoben:** Mit BLE + HID waren nur noch
+  19 KB interner RAM frei → SD-Init „not enough mem“, CNN-Task nicht erzeugt,
+  Absturz beim Koppeln/Auslösen. Jetzt liegen CNN-Task-Stack und der
+  SD-Modellpuffer (32 KB, nur wenn `/model.tflite` existiert) im PSRAM; fehlt
+  Speicher trotzdem, läuft die Uhr ohne CNN weiter. Mit BLE jetzt 52 KB frei
+  (größter Block 31 KB). Neue serielle Befehle `BTON`, `BTOFF`, `HEAP`.
+  Auslöser mit dem Handy getestet – funktioniert, keine Neustarts mehr.

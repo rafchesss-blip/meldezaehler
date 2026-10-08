@@ -8,6 +8,7 @@
 
 // Vorabdeklarationen aus ui.h (modale Masken)
 static void uiMessage(const char *icon, lv_color_t c, const char *title, const char *sub);
+static void spOeffnen();   // ui_spiel.h
 
 // Eltern-Hierarchie: Zifferblatt <- Apps <- {Melden, Einstellungen, Zeit,
 // Aufnahme, Test}; Zifferblatt <- Auswahl / Meldungen bearbeiten.
@@ -32,7 +33,7 @@ static void powerBack() {
       if (sensorRec) stopSensorRec();
       screen = 4;
       break;
-    case 1: case 2: case 7: case 8: case 11:
+    case 1: case 2: case 7: case 8: case 11: case SCREEN_SPIEL: case SCREEN_AUSLOESER:
       screen = 4;
       break;
     default:   // 3 Auswahl, 4 Apps
@@ -49,6 +50,7 @@ static void ctlOpen(int s) {
     zeitTab = 0;
   }
   screen = s;
+  if (s == SCREEN_SPIEL) spOeffnen();   // „gerade“ neu = jetzige Haltung
 }
 
 static void ctlSelectWatchface(int i) {

@@ -42,7 +42,9 @@ def lade_df(datei):
         neue_trials.append(seen[key])
     df['trial'] = neue_trials
     df['label'] = df['label'].map(lambda l: LABEL_MAP.get(l, l))
-    return df
+    # Aufnahmen für die Drannahme-Grenzen (senken_langsam/_schnell, klopfen)
+    # gehören nicht ins Melde-Modell
+    return df[df['label'].isin(KLASSEN)].copy()
 
 
 def lade_fenster_standardisiert(datei=DATEI):

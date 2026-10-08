@@ -16,13 +16,16 @@ struct UiApp {
   uint32_t color;
   int screen;
 };
-static const UiApp UI_APP_LIST[6] = {
+#define UI_APP_N 8
+static const UiApp UI_APP_LIST[UI_APP_N] = {
   {LV_SYMBOL_OK, "Melden", 0x30D158, 1},
   {LV_SYMBOL_BELL, "Zeit", 0xFF9F0A, 7},
   {LV_SYMBOL_SETTINGS, "Einstellungen", 0x8E8E93, 2},
   {LV_SYMBOL_SD_CARD, "Aufnahme", 0xFF453A, 9},
   {LV_SYMBOL_EYE_OPEN, "Test", 0x64D2FF, 8},
   {LV_SYMBOL_BATTERY_FULL, "Akku-Test", 0xFFD60A, 11},
+  {LV_SYMBOL_SHUFFLE, "Labyrinth", 0xBF5AF2, SCREEN_SPIEL},
+  {LV_SYMBOL_IMAGE, "Auslöser", 0xFF375F, SCREEN_AUSLOESER},
 };
 
 static void uiAppCb(lv_event_t *e) { ctlOpen((int)(intptr_t)lv_event_get_user_data(e)); }
@@ -32,25 +35,27 @@ static lv_obj_t *uiAppsMelde;   // Unterzeile der Melden-Kachel (Zähler heute)
 static lv_obj_t *uiBuildApps() {
   lv_obj_t *s = uiScreen();
   uiHeader(s, "Apps", uiBackCb);
-  for (int i = 0; i < 6; i++) {
+  for (int i = 0; i < UI_APP_N; i++) {
     const UiApp &a = UI_APP_LIST[i];
-    const bool wide = false;   // 6 Apps = 3 Reihen à 2 Kacheln
+    // 7 Apps = 3 Reihen à 2 Kacheln + eine breite Kachel unten
+    const bool wide = (UI_APP_N % 2 == 1) && i == UI_APP_N - 1;
     lv_obj_t *t = lv_button_create(s);
     int w = (UI_W - 2 * UI_PAD - 14) / 2;
-    lv_obj_set_size(t, w, 116);
-    lv_obj_set_pos(t, UI_PAD + (i % 2) * (w + 14), UI_HEADER_H + 4 + (i / 2) * 128);
+    lv_obj_set_size(t, wide ? UI_W - 2 * UI_PAD : w, 92);
+    lv_obj_set_pos(t, UI_PAD + (i % 2) * (w + 14), UI_HEADER_H + 4 + (i / 2) * 102);
     lv_obj_set_style_radius(t, 26, 0);
     lv_obj_set_style_bg_color(t, C_SURFACE, 0);
     lv_obj_set_style_bg_color(t, C_SURFACE2, LV_STATE_PRESSED);
     lv_obj_set_style_shadow_width(t, 0, 0);
+    lv_obj_set_style_pad_all(t, 10, 0);   // Kachel nur 92 px hoch: Symbol und Name brauchen den Platz
     lv_obj_add_event_cb(t, uiAppCb, LV_EVENT_CLICKED, (void *)(intptr_t)a.screen);
 
     lv_obj_t *dot = uiBox(t);
-    lv_obj_set_size(dot, 52, 52);
+    lv_obj_set_size(dot, 40, 40);
     lv_obj_set_style_radius(dot, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_bg_color(dot, lv_color_hex(a.color), 0);
     lv_obj_set_style_bg_opa(dot, LV_OPA_COVER, 0);
-    lv_obj_t *ic = uiLabel(dot, &font_m24, lv_color_black(), a.icon);
+    lv_obj_t *ic = uiLabel(dot, &font_m20, lv_color_black(), a.icon);
     lv_obj_center(ic);
     lv_obj_t *nm = uiLabel(t, &font_m20, C_TEXT, a.name);
     if (wide) {
@@ -694,12 +699,12 @@ static void uiRefreshTest() {
 // Sensor-Aufnahme (Trainingsdaten auf SD-Karte)
 // ===========================================================================
 static struct {
-  lv_obj_t *idle, *rec, *cls, *count;
+  lv_obj_t *idle, *rec, *cls, *count, *uebSenk, *uebStoss;
 } ur;
 
+// user_data = Klassenname der Aufnahme (Spalte "label" in /aufnahme.csv)
 static void uiRecStartCb(lv_event_t *e) {
-  bool meld = lv_event_get_user_data(e) != nullptr;
-  startSensorRec(meld ? "meldung" : "nicht_meldung");
+  startSensorRec((const char *)lv_event_get_user_data(e));
   if (!sensorRec) uiToast(LV_SYMBOL_WARNING "  SD-Karte nicht lesbar", C_RED);
 }
 static void uiRecStopCb(lv_event_t *) {
@@ -714,8 +719,25 @@ static lv_obj_t *uiBuildRec() {
   lv_obj_t *h = uiLabel(ur.idle, &font_m20, C_TEXT2, "Klasse wählen – Aufnahme startet sofort auf die SD-Karte.");
   lv_obj_set_width(h, lv_pct(100));
   lv_label_set_long_mode(h, LV_LABEL_LONG_WRAP);
-  uiButton(ur.idle, LV_SYMBOL_UP "  Meldung", C_GREEN, uiRecStartCb, (void *)1, 110);
-  uiButton(ur.idle, LV_SYMBOL_SHUFFLE "  Nicht melden", C_BLUE, uiRecStartCb, nullptr, 110);
+  uiButton(ur.idle, LV_SYMBOL_UP "  Meldung", C_GREEN, uiRecStartCb, (void *)"meldung", 110);
+  uiButton(ur.idle, LV_SYMBOL_SHUFFLE "  Nicht melden", C_BLUE, uiRecStartCb, (void *)"nicht_meldung", 110);
+  // Drangenommen/richtig/falsch: Aufnahmen für die Grenzen (nicht fürs CNN)
+  uiButton(ur.idle, LV_SYMBOL_DOWN "  Senken langsam", C_SURFACE2, uiRecStartCb, (void *)"senken_langsam", 84);
+  uiButton(ur.idle, LV_SYMBOL_DOWN LV_SYMBOL_DOWN "  Senken schnell", C_AMBER, uiRecStartCb,
+           (void *)"senken_schnell", 84);
+  uiButton(ur.idle, LV_SYMBOL_CLOSE "  Klopfen (falsch)", C_RED, uiRecStartCb, (void *)"klopfen", 84);
+  // Übungsanzeige: letzte Messwerte mit Einordnung durch die aktuellen Grenzen
+  lv_obj_t *uk = uiCard(ur.idle);
+  lv_obj_t *ut = uiLabel(uk, &font_m16, C_TEXT2, "Üben (ohne Aufnahme)");
+  LV_UNUSED(ut);
+  ur.uebSenk = uiLabel(uk, &font_m20, C_TEXT, "");
+  lv_obj_set_pos(ur.uebSenk, 0, 28);
+  lv_obj_set_width(ur.uebSenk, lv_pct(100));
+  lv_label_set_long_mode(ur.uebSenk, LV_LABEL_LONG_WRAP);
+  ur.uebStoss = uiLabel(uk, &font_m20, C_TEXT, "");
+  lv_obj_set_pos(ur.uebStoss, 0, 88);
+  lv_obj_set_width(ur.uebStoss, lv_pct(100));
+  lv_label_set_long_mode(ur.uebStoss, LV_LABEL_LONG_WRAP);
   lv_obj_t *h2 = uiLabel(ur.idle, &font_m16, C_TEXT3, "Nicht melden: einfach normal bewegen.");
   lv_obj_set_width(h2, lv_pct(100));
   lv_label_set_long_mode(h2, LV_LABEL_LONG_WRAP);
@@ -739,6 +761,21 @@ static lv_obj_t *uiBuildRec() {
 static void uiRefreshRec() {
   uiSetHidden(ur.idle, sensorRec);
   uiSetHidden(ur.rec, !sensorRec);
+  if (!sensorOn) {
+    uiSetText(ur.uebSenk, "Sensor ist aus");
+    uiSetText(ur.uebStoss, "");
+  } else {
+    if (!uebSenkMs) uiSetText(ur.uebSenk, "Senken: melden und Arm senken");
+    else if (senkGrenzeDps <= 0) uiSetTextFmt(ur.uebSenk, "Senken: %.0f °/s", uebSenkDps);
+    else uiSetTextFmt(ur.uebSenk, "Senken: %.0f °/s  ·  %s", uebSenkDps,
+                      uebSenkDps >= senkGrenzeDps ? "schnell = dran" : "langsam");
+    uiSetColor(ur.uebSenk, uebSenkMs && senkGrenzeDps > 0 && uebSenkDps >= senkGrenzeDps ? C_AMBER : C_TEXT);
+    bool zaehlt = klopfGrenzeG > 0 && uebRuckG >= klopfGrenzeG && uebStossG >= klopfStossG;
+    if (!uebStossMs) uiSetText(ur.uebStoss, "Klopfen: ans Knie klopfen");
+    else uiSetTextFmt(ur.uebStoss, "Klopfen: %.1f g, Ruck %.1f g  ·  %s", uebStossG, uebRuckG,
+                      zaehlt ? "zählt" : "zählt nicht");
+    uiSetColor(ur.uebStoss, uebStossMs && zaehlt ? C_GREEN : C_TEXT);
+  }
   if (sensorRec) {
     uiSetTextFmt(ur.cls, "%s  ·  #%u", sensorRecLabel.c_str(), (unsigned)sensorRecTrial);
     uiSetTextFmt(ur.count, "%lu", (unsigned long)sensorRecCount);

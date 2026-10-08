@@ -54,6 +54,9 @@
 #include <BLEService.h>
 #include <BLECharacteristic.h>
 #include <BLEUtils.h>
+#include <BLEHIDDevice.h>
+#include "freertos/idf_additions.h"   // Task-Stack im PSRAM
+#include <BLESecurity.h>
 #include "HWCDC.h"
 #define XPOWERS_CHIP_AXP2101
 #include "XPowersLib.h"
@@ -365,9 +368,11 @@ static bool vibPhaseOn = false;
 static int vibPulsesLeft = 0;            // Pulse nach dem laufenden
 static unsigned long vibOnMs = 0, vibGapMs = 0, vibNextMs = 0;
 
-static void vibrate(unsigned long ms = 120, int pulses = 1, unsigned long gapMs = 100) {
+// force: auch bei „Stumm im Unterricht“ (Rückmeldung auf eine Bedienung);
+// ist der Motor in den Einstellungen ganz aus, bleibt er aus.
+static void vibrate(unsigned long ms = 120, int pulses = 1, unsigned long gapMs = 100, bool force = false) {
   if (alarmActive) return;   // Wecker-Muster hat Vorrang
-  if (!vibrationAllowed()) {
+  if (force ? !motorOn : !vibrationAllowed()) {
     USBSerial.printf("[vib] Vibration unterdrueckt\n");
     return;
   }
@@ -449,7 +454,10 @@ static TfLiteTensor *cnnOutput = nullptr;
 
 // Optional: CNN-Modell von der SD-Karte (/model.tflite) statt aus dem Flash
 #define CNN_MODEL_MAX_BYTES (32 * 1024)
-alignas(8) static uint8_t cnnModelSdBuf[CNN_MODEL_MAX_BYTES];
+// Puffer erst bei Bedarf und im PSRAM: als statisches Feld belegte er 32 KB des
+// knappen internen RAM, auch wenn kein SD-Modell da ist (mit BLE + Auslöser-HID
+// blieben nur 19 KB frei -> Abstürze, 07.10.2026)
+static uint8_t *cnnModelSdBuf = nullptr;
 static const unsigned char *cnnModelData = modell_cnn_int8_tflite;  // Standard: Flash
 #endif
 
@@ -524,6 +532,11 @@ bool calibrated = false;
 #define VIB_REP_MS     100   // kurze Vibration pro Kalibrier-Wiederholung
 #define VIB_SCHRITT_MS 500   // längere Vibration nach jedem Kalibrier-Schritt
 #define LEAVE_HOCH   0.00f
+// Zusätzlich muss die Lage wirklich nahe an „Arm hoch“ sein (cos zum H-Vektor):
+// score = dotH - dotN allein ist auch weit weg von beiden positiv (z. B. Uhr
+// auf dem Tisch bei schwacher Kalibrierung: dotH -0,07, dotN -0,50 -> „oben“).
+#define HOCH_MIN_DOT   0.50f   // ≈ 60° um „Arm hoch“
+#define HOCH_RAUS_DOT  0.40f   // Ausstieg mit etwas Abstand (kein Flattern)
 #define MIN_HALTEN_MS  500
 #define SPERRE_MS      2500
 
@@ -575,6 +588,32 @@ unsigned long meldeZeitMs = 0;   // gesamte Zeit, die der Arm oben war (Meldzeit
 int drange = 0;    // wie oft drangenommen
 int richtig = 0;   // Antwort richtig
 int falsch = 0;    // Antwort falsch
+// Drangenommen/richtig/falsch ohne Display und ohne Taste:
+//  - Arm nach einer Meldung SCHNELL senken = drangenommen + richtig
+//    (größte Drehrate beim Senken >= senkGrenzeDps), langsam = nur gemeldet
+//  - danach bis zur nächsten Meldung einmal mit der Uhr ans Knie klopfen
+//    (Ruck >= klopfGrenzeG UND Stärke >= klopfStossG innerhalb von 0,3 s;
+//    gemessen 07.10.2026: Knie 1,7–2,4 g / Ruck 1,5–2,8 g, normale Bewegung
+//    nie beides – entweder Ruck <= 1,5 oder Stärke <= 1,4) = doch falsch
+// Grenzen per seriell SENK / KLOPF (NVS); 0 = aus, dann nur Messwerte ausgeben.
+int senkGrenzeDps = 0;
+float klopfGrenzeG = 0;   // Ruck: größte Achsenänderung zwischen zwei Messungen (10 ms)
+float klopfStossG = 1.6f;  // Stärke: Abweichung des Beschleunigungsbetrags von 1 g
+#define SENK_FENSTER_N    100      // Senken: höchstens die letzte 1 s auswerten
+#define SENK_OBEN_COS     0.85f    // „sicher oben“: Lage nahe der kalibrierten Arm-hoch-Richtung
+// Senken wird ab dem Ende des Hochhaltens gemessen (nicht im festen 1-s-Fenster,
+// sonst zählt bei kurzem Hochhalten das Heben mit – Aufnahmen 07.10.2026)
+static uint32_t sampleIdx = 0;      // laufende Nummer des Samples
+static uint32_t lastObenIdx = 0;    // letztes Sample „sicher oben“
+static float senkEma[3] = {0, 0, 1};
+#define KLOPF_SPERRE_MS   1500     // direkt nach dem Senken nicht (Armbewegung selbst)
+// Letzte Messwerte für die Übungsanzeige in der Aufnahme-App (0 = noch keine)
+float uebSenkDps = 0;
+unsigned long uebSenkMs = 0;
+float uebStossG = 0, uebRuckG = 0;
+unsigned long uebStossMs = 0;
+unsigned long autoDrangeMs = 0;    // letzte automatisch erkannte Drannahme (0 = keine offen;
+                                   // die nächste Meldung schließt das Fenster)
 
 // Letzte Meldungen (nur für "letzte Meldung löschen/bearbeiten")
 #define MAX_MELD_LOG 16
@@ -602,8 +641,19 @@ unsigned long bootDownMs = 0;
 // Doppel-Klick-Erkennung (zwei schnelle BOOT-Drücke)
 bool bootDoublePending = false;
 unsigned long bootFirstPressMs = 0;
+// Kurzbefehle (BOOT 1 s halten, dann 2x kurz = Meldung löschen, nochmal 1 s
+// halten = Meldung hinzufügen) – ohne Display und ohne Menü
+#define BOOT_LONG_MS     1000
+#define BOOT_SHORTCUT_MS 3000   // so lange wartet der Kurzbefehl auf die zweite Eingabe
+bool bootLongFired = false;      // laufender Druck hat die 1-s-Schwelle schon ausgelöst
+bool bootShortcut = false;       // Kurzbefehl bereit
+unsigned long bootShortcutUntil = 0;
+int bootShortcutClicks = 0;
+unsigned long bootShortcutClickMs = 0;
 
 // App-Struktur (Launcher)
+#define SCREEN_SPIEL 12         // Labyrinth (ui_spiel.h): dort zählen keine Meldungen
+#define SCREEN_AUSLOESER 13     // Kamera-Auslöser (ui_ausloeser.h)
 int screen = 0;                // 0 = Watchface, 1 = Melden, 2 = Einstellungen, 3 = Zifferblatt, 4 = Apps, 6 = Meldungen bearbeiten, 7 = Zeit, 8 = Test, 9 = Sensor-Aufnahme
 int meldeEditMode = 0;         // 0 = Menü (Löschen/Hinzufügen/Bearbeiten), 1 = Bearbeiten, 2 = Richtig/Falsch
 
@@ -1215,6 +1265,12 @@ static bool loadCnnModelFromSd() {
     f.close();
     return false;
   }
+  if (!cnnModelSdBuf) cnnModelSdBuf = (uint8_t *)heap_caps_aligned_alloc(16, CNN_MODEL_MAX_BYTES, MALLOC_CAP_SPIRAM);
+  if (!cnnModelSdBuf) {
+    USBSerial.println("[cnn] kein Speicher fuer /model.tflite - nutze eingebautes Modell");
+    f.close();
+    return false;
+  }
   size_t r = f.read(cnnModelSdBuf, n);
   f.close();
   if (r != n) {
@@ -1336,7 +1392,19 @@ static int predictClassCNN(float prob[2], bool &fresh) {
   fresh = false;
   cnnInit();
   if (!cnnOk) return 1;   // sicherer Fallback: NICHT-MELDEN
-  if (!cnnTask) xTaskCreatePinnedToCore(cnnWorker, "cnn", 8192, nullptr, 1, &cnnTask, 0);
+  if (!cnnTask) {
+    // Stack im PSRAM: der interne RAM ist mit Bluetooth (+ Auslöser-HID) knapp –
+    // am 07.10.2026 scheiterte das Anlegen, danach Absturz in einer Neustart-Schleife
+    if (xTaskCreatePinnedToCoreWithCaps(cnnWorker, "cnn", 8192, nullptr, 1, &cnnTask, 0,
+                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS)
+      xTaskCreatePinnedToCore(cnnWorker, "cnn", 8192, nullptr, 1, &cnnTask, 0);
+    if (!cnnTask) {   // ohne Task kein CNN, aber auch kein Absturz
+      static bool gemeldet = false;
+      if (!gemeldet) USBSerial.println("[cnn] Task konnte nicht angelegt werden (Speicher)");
+      gemeldet = true;
+      return 1;
+    }
+  }
   if (cnnBusy) return aktuellKlasse;
 
   if (cnnResultReady) {
@@ -1391,6 +1459,52 @@ static void readAndStoreSample() {
 
   bufHead = (bufHead + 1) % BUF_N;
   if (bufCount < BUF_N) bufCount++;
+
+  // Lage geglättet (≈ 0,25 s) mit der Arm-hoch-Richtung vergleichen
+  sampleIdx++;
+  senkEma[0] += (ax * ACCEL_SCALE - senkEma[0]) * 0.04f;
+  senkEma[1] += (ay * ACCEL_SCALE - senkEma[1]) * 0.04f;
+  senkEma[2] += (az * ACCEL_SCALE - senkEma[2]) * 0.04f;
+  if (vdot(vnorm({senkEma[0], senkEma[1], senkEma[2]}), H_dir) > SENK_OBEN_COS) lastObenIdx = sampleIdx;
+
+  // Klopfen ans Knie: Stärke (Abweichung des Betrags von 1 g) und Ruck
+  // (größte Achsenänderung zur vorigen Messung, 10 ms) – ein Klopfer ist kurz
+  // und hart, eine Armbewegung eher fließend
+  float ga = ax * ACCEL_SCALE, gb = ay * ACCEL_SCALE, gc = az * ACCEL_SCALE;
+  static float pa = 0, pb = 0, pc = 1;
+  float stoss = fabsf(sqrtf(ga * ga + gb * gb + gc * gc) - 1.0f);
+  float ruck = fmaxf(fabsf(ga - pa), fmaxf(fabsf(gb - pb), fabsf(gc - pc)));
+  pa = ga;
+  pb = gb;
+  pc = gc;
+  // Messausgabe für die Einstellung: je Ereignis (300 ms) die Höchstwerte
+  static unsigned long evStartMs = 0;
+  static float evStoss = 0, evRuck = 0;
+  unsigned long now = millis();
+  if (stoss >= 0.4f || ruck >= 0.3f) {
+    if (!evStartMs) evStartMs = now;
+    evStoss = fmaxf(evStoss, stoss);
+    evRuck = fmaxf(evRuck, ruck);
+  }
+  if (evStartMs && now - evStartMs > 300) {   // Ereignis abgeschlossen: auswerten
+    USBSerial.printf("[stoss] %.2f g  ruck %.2f g\n", evStoss, evRuck);
+    if (evStoss >= 1.0f || evRuck >= 1.0f) {   // nur deutliche Stöße für die Übungsanzeige
+      uebStossG = evStoss;
+      uebRuckG = evRuck;
+      uebStossMs = now;
+    }
+    if (klopfGrenzeG > 0 && autoDrangeMs && evRuck >= klopfGrenzeG && evStoss >= klopfStossG &&
+        evStartMs - autoDrangeMs > KLOPF_SPERRE_MS) {
+      autoDrangeMs = 0;   // nur einmal je Drannahme
+      if (richtig > 0) richtig--;
+      falsch++;
+      saveMeldeExtras();
+      vibrate(120, 3, 150, true);   // falsch: 3x
+      USBSerial.printf("[auto] Klopfen -> falsch. richtig=%d falsch=%d\n", richtig, falsch);
+    }
+    evStartMs = 0;
+    evStoss = evRuck = 0;
+  }
 }
 
 // Liefert ein bereits rotiertes Sensor-Sample (g, dps) für den PC-Trainings-
@@ -1496,8 +1610,14 @@ static void evaluate() {
                      imHoch ? 1 : 0);
   }
 
+  // Im Labyrinth wird die Uhr ständig geneigt – das sind keine Meldungen
+  if (screen == SCREEN_SPIEL) {
+    imHoch = false;
+    return;
+  }
+
   if (!imHoch) {
-    if (aktuellScore > enterHoch) {
+    if (aktuellScore > enterHoch && dotH > HOCH_MIN_DOT) {
       imHoch = true;
       hochSeitMs = now;
       hochNicht = false;
@@ -1514,7 +1634,7 @@ static void evaluate() {
       else hochNichtCount++;
     }
 
-    if (aktuellScore < LEAVE_HOCH) {
+    if (aktuellScore < LEAVE_HOCH || dotH < HOCH_RAUS_DOT) {
       unsigned long dauer = now - hochSeitMs;
       hochNicht = (hochNichtCount > hochMeldungCount);
       bool zaehlt = (dauer >= MIN_HALTEN_MS) &&
@@ -1523,10 +1643,30 @@ static void evaluate() {
       USBSerial.printf("[zustand] arm unten (dauer=%lums klasse=%d meldC=%d nichtC=%d zaehlt=%d)\n",
                        dauer, aktuellKlasse, hochMeldungCount, hochNichtCount,
                        zaehlt ? 1 : 0);
+      // Wie schnell wurde der Arm gesenkt? Größte Drehrate seit dem Ende des
+      // Hochhaltens (höchstens 1 s, mindestens 5 Samples)
+      uint32_t seitOben = sampleIdx - lastObenIdx;
+      int senkN = (int)constrain((long)seitOben + 1, 5L, (long)SENK_FENSTER_N);
+      if (senkN > bufCount) senkN = bufCount;
+      Stats senk = computeStats(senkN);
+      USBSerial.printf("[senken] %.0f dps (Grenze %d)\n", senk.gmax, senkGrenzeDps);
+      uebSenkDps = senk.gmax;
+      uebSenkMs = now;
       if (zaehlt) {
         registerMeldung(dauer);
         letzteMeldungMs = now;
-        vibrate(120);   // haptisches Feedback am Handgelenk
+        autoDrangeMs = 0;   // neue Meldung: Klopf-Fenster der vorigen schließt
+        if (senkGrenzeDps > 0 && senk.gmax >= senkGrenzeDps) {
+          // schnell gesenkt = drangenommen, zunächst als richtig
+          drange++;
+          richtig++;
+          saveMeldeExtras();
+          autoDrangeMs = now;
+          vibrate(120, 2, 150, true);   // drangenommen: 2x statt 1x
+          USBSerial.printf("[auto] schnell gesenkt -> drangenommen + richtig (drange=%d)\n", drange);
+        } else {
+          vibrate(120);   // haptisches Feedback am Handgelenk
+        }
         USBSerial.print(">>> MELDUNG!  Gesamt heute: ");
         USBSerial.println(totalHeute);
       }
@@ -1910,11 +2050,66 @@ static void processBleCommands() {
   }
 }
 
+// Bluetooth-Medientaste (HID, Consumer Control) für den Kamera-Auslöser:
+// Report 1, Bit 0 = Lauter, Bit 1 = Leiser
+static BLEHIDDevice *hidDev = nullptr;
+static BLECharacteristic *hidInput = nullptr;
+static const uint8_t HID_REPORT_MAP[] = {
+  0x05, 0x0C,         // Usage Page (Consumer)
+  0x09, 0x01,         // Usage (Consumer Control)
+  0xA1, 0x01,         // Collection (Application)
+  0x85, 0x01,         //   Report ID (1)
+  0x15, 0x00,         //   Logical Minimum (0)
+  0x25, 0x01,         //   Logical Maximum (1)
+  0x75, 0x01,         //   Report Size (1)
+  0x95, 0x02,         //   Report Count (2)
+  0x09, 0xE9,         //   Usage (Volume Increment)
+  0x09, 0xEA,         //   Usage (Volume Decrement)
+  0x81, 0x02,         //   Input (Data, Variable, Absolute)
+  0x95, 0x06,         //   Report Count (6) – Auffüllen auf 1 Byte
+  0x81, 0x03,         //   Input (Constant)
+  0xC0                // End Collection
+};
+
+static bool hidConnected() { return pServer && pServer->getConnectedCount() > 0; }
+
+// „Lauter“ drücken und loslassen (löst Handy-Kameras aus)
+static bool hidVolumeUp() {
+  if (!btOn || !hidInput || !hidConnected()) return false;
+  uint8_t v = 0x01;
+  hidInput->setValue(&v, 1);
+  hidInput->notify();
+  delay(30);
+  v = 0x00;
+  hidInput->setValue(&v, 1);
+  hidInput->notify();
+  return true;
+}
+
+static void hidSetup() {
+  // Koppeln ohne PIN („Just Works“) mit Bonding – HID-Hosts verlangen eine
+  // verschlüsselte Verbindung
+  BLESecurity::setAuthenticationMode(ESP_LE_AUTH_BOND);
+  BLESecurity::setCapability(ESP_IO_CAP_NONE);
+  BLESecurity::setInitEncryptionKey(ESP_BLE_ENC_KEY_MASK | ESP_BLE_ID_KEY_MASK);
+  hidDev = new BLEHIDDevice(pServer);
+  hidInput = hidDev->inputReport(1);
+  hidDev->manufacturer()->setValue("Meldezaehler");   // erst anlegen, dann setzen
+  hidDev->pnp(0x02, 0x303A, 0x4001, 0x0100);
+  hidDev->hidInfo(0x00, 0x01);
+  hidDev->reportMap((uint8_t *)HID_REPORT_MAP, sizeof(HID_REPORT_MAP));
+  hidDev->startServices();
+  hidDev->setBatteryLevel(cachedPct >= 0 ? cachedPct : 100);
+}
+
 static void btEnable() {
   if (!bleInited) {
     if (!bleCmdQueue) bleCmdQueue = xQueueCreate(32, sizeof(BleCmd));
     BLEDevice::init("Meldezaehler");
     pServer = BLEDevice::createServer();
+    // Nach dem Trennen (App geschlossen) wieder sichtbar werden – in dieser
+    // BLE-Version ist das standardmäßig aus, die Uhr wäre sonst unerreichbar
+    pServer->advertiseOnDisconnect(true);
     BLEService *pService = pServer->createService(BLE_SERVICE_UUID);
     pCharTime = pService->createCharacteristic(BLE_CHAR_TIME_UUID, BLECharacteristic::PROPERTY_WRITE);
     pCharStats = pService->createCharacteristic(BLE_CHAR_STATS_UUID, BLECharacteristic::PROPERTY_READ);
@@ -1930,10 +2125,13 @@ static void btEnable() {
     pCharLesson->setValue(buildLessonJson().c_str());
     pCharAkku->setValue(akJson().c_str());
     pService->start();
+    hidSetup();
     bleInited = true;
     BLEAdvertising *pAdv = BLEDevice::getAdvertising();
     if (pAdv) {
       pAdv->addServiceUUID(BLE_SERVICE_UUID);
+      pAdv->setAppearance(0x0180);   // „Generic Remote Control“ – Handy zeigt die Uhr als Fernbedienung
+      pAdv->addServiceUUID(hidDev->hidService()->getUUID());
     }
   }
   BLEAdvertising *pAdv = BLEDevice::getAdvertising();
@@ -1946,7 +2144,8 @@ static void btEnable() {
   }
   btOn = true;
   prefs.putInt("btOn", 1);
-  USBSerial.println("BLE aktiviert (Name: Meldezaehler, Zeit/Statistik-Dienst)");
+  USBSerial.printf("BLE aktiviert (Name: Meldezaehler, Zeit/Statistik-Dienst), intern frei %u B\n",
+                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL));
 }
 
 static void btDisable() {
@@ -2100,15 +2299,47 @@ static void handleButtons() {
     }
   }
 
-  // Boot-Taste GPIO0 (aktiv LOW) – Auslösen beim Loslassen
+  // Boot-Taste GPIO0 (aktiv LOW) – Klicks werden beim Loslassen ausgewertet,
+  // 1 s Halten schon während des Drückens (Kurzbefehle)
   bool b = digitalRead(BOOT_BTN_PIN) == LOW;
   if (b && !bootBtnWasDown) {
     bootBtnWasDown = true;
     bootDownMs = now;
+    bootLongFired = false;
+  } else if (b && !bootLongFired && now - bootDownMs >= BOOT_LONG_MS && !akBusy) {
+    bootLongFired = true;
+    bootDoublePending = false;   // kein Menü
+    if (!bootShortcut) {
+      bootShortcut = true;
+      bootShortcutClicks = 0;
+      vibrate(80, 1, 100, true);
+      USBSerial.println("[boot] Kurzbefehl bereit");
+    } else {
+      // zweites Halten: Meldung hinzufügen (ohne drangenommen/richtig/falsch)
+      bootShortcut = false;
+      registerMeldung(0);
+      goalCelebratePending = false;   // Display bleibt aus
+      vibrate(400, 1, 100, true);
+      USBSerial.printf("[boot] Meldung hinzugefuegt. Heute: %d\n", totalHeute);
+    }
   } else if (!b && bootBtnWasDown) {
     bootBtnWasDown = false;
     unsigned long d = now - bootDownMs;
-    if (d >= 30 && d < 1500) {
+    if (bootLongFired) {
+      if (bootShortcut) bootShortcutUntil = now + BOOT_SHORTCUT_MS;   // Zeit für die zweite Eingabe
+    } else if (bootShortcut && d >= 30) {
+      // Kurzbefehl: zwei schnelle Klicks = letzte Meldung löschen
+      if (bootShortcutClicks == 1 && now - bootShortcutClickMs <= BOOT_DOUBLE_MS) {
+        bootShortcut = false;
+        removeLastMeldung();
+        vibrate(100, 2, 120, true);
+        USBSerial.println("[boot] Kurzbefehl: letzte Meldung geloescht");
+      } else {
+        bootShortcutClicks = 1;
+        bootShortcutClickMs = now;
+        bootShortcutUntil = now + BOOT_DOUBLE_MS;   // nur ein Klick: kurz darauf abbrechen
+      }
+    } else if (d >= 30 && d < BOOT_LONG_MS) {
       if (bootDoublePending && (now - bootFirstPressMs) <= BOOT_DOUBLE_MS) {
         bootDoublePending = false;
         bootDoublePress();
@@ -2117,6 +2348,12 @@ static void handleButtons() {
         bootFirstPressMs = now;
       }
     }
+  }
+
+  // Kurzbefehl ohne (vollständige) zweite Eingabe: still abbrechen
+  if (bootShortcut && !b && (long)(now - bootShortcutUntil) > 0) {
+    bootShortcut = false;
+    USBSerial.println("[boot] Kurzbefehl abgebrochen");
   }
 
   // Einzel-Klick ausführen, wenn kein zweiter Klick folgt
@@ -2211,6 +2448,26 @@ static void handleSerial() {
         } else if (line.startsWith("TTCMD ")) {
           // Stundenplan-Befehl wie per BLE (CLEAR, P|..., SAVE) – zum Testen ohne App
           handleTTCommand(line.substring(6));
+        } else if (line.startsWith("SENK")) {
+          // SENK <Grad/s>: ab dieser Drehrate beim Senken = drangenommen (0 = aus)
+          if (line.length() > 5) {
+            senkGrenzeDps = constrain(line.substring(5).toInt(), 0, 2000);
+            prefs.putInt("senkDps", senkGrenzeDps);
+          }
+          USBSerial.printf("Senk-Grenze %d dps%s\n", senkGrenzeDps, senkGrenzeDps ? "" : " (aus)");
+        } else if (line.startsWith("KLOPF")) {
+          // KLOPF <ruck> [<staerke>] in g: beides nötig nach einer Drannahme = falsch (0 = aus)
+          if (line.length() > 6) {
+            String a = line.substring(6);
+            a.trim();
+            int sp = a.indexOf(' ');
+            klopfGrenzeG = constrain(a.toFloat(), 0.0f, 4.0f);
+            if (sp > 0) klopfStossG = constrain(a.substring(sp + 1).toFloat(), 0.0f, 4.0f);
+            prefs.putFloat("klopfG", klopfGrenzeG);
+            prefs.putFloat("klopfS", klopfStossG);
+          }
+          USBSerial.printf("Klopf-Grenze: Ruck %.2f g, Staerke %.2f g%s\n", klopfGrenzeG, klopfStossG,
+                           klopfGrenzeG > 0 ? "" : " (aus)");
         } else if (line == "MELDUNG") {
           registerMeldung();
           USBSerial.printf("Meldung gezaehlt. Heute %d, diese Stunde %d\n", totalHeute, sessionCount);
@@ -2225,6 +2482,16 @@ static void handleSerial() {
                            mv / 1000.0f, gauge, voltPct,
                            pmu.isCharging() ? "laedt" : "entlaedt",
                            pmu.isBatteryConnect() ? "Akku verbunden" : "kein Akku");
+        } else if (line == "HEAP") {
+          USBSerial.printf("Intern frei %u B (groesster Block %u B, Minimum seit Start %u B), PSRAM frei %u B\n",
+                           (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL),
+                           (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
+                           (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
+                           (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+        } else if (line == "BTON") {   // Bluetooth einschalten (wie in den Einstellungen)
+          btEnable();
+        } else if (line == "BTOFF") {
+          btDisable();
         } else if (line == "BTN") {
           pinMode(PWR_KEY_PIN, INPUT);
           USBSerial.printf("Power-Taste (GPIO%d): %s\n", PWR_KEY_PIN,
@@ -2329,7 +2596,7 @@ static void handleSerial() {
             USBSerial.println("\n#SDDUMP ENDE");
           }
         } else {
-          USBSerial.println("Unbekannt. Befehle: RESET, CAL, CALIB, STATS, BATT, BTN, SLEEP, VIB, TT, TTCMD <P|...>, MELDUNG, SDDUMP, SDMODELAUS, SENSOR, STREAM, STOPSTREAM, RECSD, STOPSD, SDCHECK, AKKU, AKKULOG, AKKUSTART, AKKUSTOP, AKKUCLEAR, TIME HH:MM:SS, DATE DD.MM.YY");
+          USBSerial.println("Unbekannt. Befehle: RESET, CAL, CALIB, STATS, BATT, BTN, SLEEP, VIB, TT, TTCMD <P|...>, MELDUNG, SENK n, KLOPF ruck [staerke], SDDUMP, SDMODELAUS, SENSOR, STREAM, STOPSTREAM, RECSD, STOPSD, SDCHECK, AKKU, AKKULOG, AKKUSTART, AKKUSTOP, AKKUCLEAR, TIME HH:MM:SS, DATE DD.MM.YY");
         }
       }
       line = "";

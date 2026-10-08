@@ -78,6 +78,9 @@ void setup() {
   sensorOn = prefs.getInt("sensorOn", 1) == 1;
   recTrialCounter = prefs.getInt("recTrial", 1000);
   motorOn = prefs.getInt("motorOn", 1) == 1;
+  senkGrenzeDps = prefs.getInt("senkDps", 0);
+  klopfGrenzeG = prefs.getFloat("klopfG", 0);
+  klopfStossG = prefs.getFloat("klopfS", 1.6f);
   muteInLessons = prefs.getInt("muteLessons", 0) == 1;
   autoSensor = prefs.getInt("autoSensor", 0) == 1;
   lastSession = prefs.getInt("lastSession", 0);
